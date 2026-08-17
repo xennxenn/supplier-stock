@@ -273,12 +273,12 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
 
   const handleExportCSV = () => {
     const { headers, rows } = getExportData();
-    exportToCSV("PASAYA_TRANSACTIONS", headers, rows);
+    exportToCSV("ACCESSORIES_TRANSACTIONS", headers, rows);
   };
 
   const handleExportExcel = () => {
     const { headers, rows } = getExportData();
-    exportToExcel("PASAYA_TRANSACTIONS", "Disbursements", headers, rows);
+    exportToExcel("ACCESSORIES_TRANSACTIONS", "Disbursements", headers, rows);
   };
 
   const renderSortIndicator = (field: SortField) => {

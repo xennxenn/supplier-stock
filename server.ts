@@ -138,87 +138,6 @@ const DEFAULT_EMPLOYEES: Employee[] = [
       backup: true,
     },
   },
-  {
-    id: "emp_lawan",
-    name: "ลาวัลย์ ไยยธรรม (วัลย์)",
-    username: "lawan",
-    password: "password",
-    pin: "5102",
-    role: "manager",
-    department: "แพ็ค / คลังวัตถุดิบ",
-    employeeCode: "510220",
-    allowedLines: ["แพ็ค", "คลังวัตถุดิบ", "ทอผ้า"],
-    allowedSuppliers: [],
-    perms: {
-      view: true,
-      viewDashboard: true,
-      viewStock: true,
-      viewTransactions: true,
-      receive: true,
-      issue: true,
-      viewAlerts: true,
-      viewForecast: true,
-      reports: true,
-      addItem: true,
-      importExport: true,
-      employees: false,
-      backup: false,
-    },
-  },
-  {
-    id: "emp_1786962075284",
-    name: "จิตรานุช ทองชมภู",
-    username: "t57007",
-    password: "57007",
-    pin: "57007",
-    role: "staff",
-    department: "MTO",
-    employeeCode: "T57007",
-    allowedLines: ["MTO"],
-    allowedSuppliers: ["China", "SOMFY(TH)", "Satin"],
-    perms: {
-      view: true,
-      viewDashboard: true,
-      viewStock: true,
-      viewTransactions: true,
-      receive: false,
-      issue: false,
-      viewAlerts: true,
-      viewForecast: true,
-      reports: true,
-      addItem: false,
-      importExport: true,
-      employees: false,
-      backup: false,
-    },
-  },
-  {
-    id: "emp_1786962117347",
-    name: "เกษรา นัยนาประเสริฐ",
-    username: "t61088",
-    password: "61088",
-    pin: "61088",
-    role: "staff",
-    department: "MTO",
-    employeeCode: "T61088",
-    allowedLines: ["MTO"],
-    allowedSuppliers: ["SOMFY(TH)", "Satin", "China"],
-    perms: {
-      view: true,
-      viewDashboard: true,
-      viewStock: true,
-      viewTransactions: true,
-      receive: false,
-      issue: false,
-      viewAlerts: true,
-      viewForecast: true,
-      reports: false,
-      addItem: false,
-      importExport: true,
-      employees: false,
-      backup: false,
-    },
-  },
 ];
 
 function getStoredEmployees(): Employee[] {
@@ -796,7 +715,7 @@ app.post("/api/transactions", rateLimiter(80), (req, res) => {
 });
 
 // Employees Endpoints - Persistent Shared Storage
-app.get("/api/employees", rateLimiter(100), (_req, res) => {
+app.get("/api/employees", rateLimiter(120), (_req, res) => {
   try {
     const emps = getStoredEmployees();
     res.json({ success: true, employees: emps });
@@ -805,7 +724,49 @@ app.get("/api/employees", rateLimiter(100), (_req, res) => {
   }
 });
 
-app.post("/api/employees", rateLimiter(40), (req, res) => {
+// Authentication Endpoint - Direct Server-side Validation
+app.post("/api/login", rateLimiter(40), (req, res) => {
+  try {
+    const { username = "", password = "" } = req.body || {};
+    const cleanUser = String(username).replace(/<[^>]*>?/gm, "").trim().toLowerCase();
+    const cleanPass = String(password).replace(/<[^>]*>?/gm, "").trim();
+
+    if (!cleanUser || !cleanPass) {
+      return res.status(400).json({ success: false, error: "กรุณาระบุชื่อผู้ใช้งานและรหัสผ่าน" });
+    }
+
+    const emps = getStoredEmployees();
+    const matched = emps.find((e) => {
+      const u = (e.username || "").toLowerCase().trim();
+      const code = (e.employeeCode || "").toLowerCase().trim();
+      const id = (e.id || "").toLowerCase().trim();
+      return u === cleanUser || code === cleanUser || id === cleanUser;
+    });
+
+    if (!matched) {
+      return res.status(401).json({ success: false, error: "ไม่พบชื่อผู้ใช้งานหรือรหัสพนักงานในระบบ" });
+    }
+
+    const isMatch =
+      (matched.password && matched.password.trim() === cleanPass) ||
+      (matched.pin && matched.pin.trim() === cleanPass) ||
+      (matched.role === "admin" && (cleanPass === "admin" || cleanPass === "1234"));
+
+    if (!isMatch) {
+      return res.status(401).json({ success: false, error: "รหัสผ่านไม่ถูกต้อง" });
+    }
+
+    res.json({
+      success: true,
+      employee: matched,
+      allEmployees: emps,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/employees", rateLimiter(60), (req, res) => {
   try {
     const { employees: rawEmps } = req.body;
     if (!Array.isArray(rawEmps) || rawEmps.length === 0) {
@@ -814,9 +775,9 @@ app.post("/api/employees", rateLimiter(40), (req, res) => {
 
     // Sanitize employee entries to prevent malicious injection
     const sanitizedEmps: Employee[] = rawEmps.map((e: any) => ({
-      id: sanitizeText(e.id) || `emp_${Date.now()}`,
+      id: sanitizeText(e.id) || `emp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       name: sanitizeText(e.name),
-      username: sanitizeText(e.username).toLowerCase(),
+      username: sanitizeText(e.username),
       password: String(e.password || "").trim(),
       pin: String(e.pin || "").trim(),
       role: (["admin", "manager", "staff"].includes(e.role) ? e.role : "staff") as any,

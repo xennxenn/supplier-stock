@@ -8,12 +8,15 @@ import {
   AlertCircle,
   ShieldCheck,
   Clock,
+  Sparkles,
 } from "lucide-react";
 import type { Employee } from "../types";
+import { loginOnline, fetchEmployeesOnline } from "../api";
 
 interface LoginScreenProps {
   employees: Employee[];
-  onLogin: (employee: Employee, remember: boolean) => void;
+  onLogin: (employee: Employee, remember: boolean, allEmps?: Employee[]) => void;
+  onSyncEmployees?: (emps: Employee[]) => void;
 }
 
 const MAX_FAILED_ATTEMPTS = 5;
@@ -22,6 +25,7 @@ const LOCKOUT_DURATION_SEC = 60;
 export const LoginScreen: React.FC<LoginScreenProps> = ({
   employees,
   onLogin,
+  onSyncEmployees,
 }) => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -52,6 +56,15 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     }
     return 0;
   });
+
+  // Pre-fetch live employees on login screen mount so new machines get the latest list immediately
+  useEffect(() => {
+    fetchEmployeesOnline().then((liveEmps) => {
+      if (liveEmps && liveEmps.length > 0 && onSyncEmployees) {
+        onSyncEmployees(liveEmps);
+      }
+    });
+  }, [onSyncEmployees]);
 
   // Lockout countdown timer
   useEffect(() => {
@@ -89,7 +102,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     }
   }, []);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
@@ -100,7 +113,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     }
 
     // Input sanitization - strip html tags & trim
-    const cleanUsername = username.replace(/<[^>]*>?/gm, "").trim().toLowerCase();
+    const cleanUsername = username.replace(/<[^>]*>?/gm, "").trim();
     const cleanPassword = password.replace(/<[^>]*>?/gm, "").trim();
 
     if (!cleanUsername) {
@@ -114,21 +127,48 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
     setIsSubmitting(true);
 
-    // Search matching employee by username, employeeCode, or id
+    try {
+      // 1. Try authoritative server login first (handles cross-machine instant sync)
+      const serverResult = await loginOnline(cleanUsername, cleanPassword);
+      if (serverResult && serverResult.success && serverResult.employee) {
+        setFailedCount(0);
+        try {
+          sessionStorage.removeItem("pasaya_login_failed_count");
+          sessionStorage.removeItem("pasaya_login_lockout_until");
+        } catch {
+          // ignore
+        }
+
+        if (rememberMe) {
+          localStorage.setItem("pasaya_saved_username", cleanUsername);
+        } else {
+          localStorage.removeItem("pasaya_saved_username");
+        }
+
+        setIsSubmitting(false);
+        onLogin(serverResult.employee, rememberMe, serverResult.allEmployees);
+        return;
+      }
+    } catch (err) {
+      console.warn("Online login attempt errored, checking offline cache fallback:", err);
+    }
+
+    // 2. Fallback check against cached/preloaded employees in memory
+    const cleanUserLower = cleanUsername.toLowerCase();
     const emp = employees.find((x) => {
       const u = (x.username || "").toLowerCase().trim();
       const code = (x.employeeCode || "").toLowerCase().trim();
       const id = (x.id || "").toLowerCase().trim();
-      return u === cleanUsername || code === cleanUsername || id === cleanUsername;
+      return u === cleanUserLower || code === cleanUserLower || id === cleanUserLower;
     });
 
-    // Check credentials with constant-time equality evaluation
     let isValid = false;
     if (emp) {
-      const validPwd = (emp.password && emp.password.trim() === cleanPassword) ||
-                       (emp.pin && emp.pin.trim() === cleanPassword);
-      // Extra admin fallback for initial setup
-      const adminFallback = emp.role === "admin" && (cleanPassword === "admin" || cleanPassword === "1234");
+      const validPwd =
+        (emp.password && emp.password.trim() === cleanPassword) ||
+        (emp.pin && emp.pin.trim() === cleanPassword);
+      const adminFallback =
+        emp.role === "admin" && (cleanPassword === "admin" || cleanPassword === "1234");
       isValid = Boolean(validPwd || adminFallback);
     }
 
@@ -150,7 +190,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
           // ignore
         }
         setLockoutRemaining(LOCKOUT_DURATION_SEC);
-        setError(`ป้อนรหัสผ่านผิดเกินกำหนด ระบบระงับการเข้าสู่ระบบชั่วคราว ${LOCKOUT_DURATION_SEC} วินาที เพื่อความปลอดภัย`);
+        setError(
+          `ป้อนรหัสผ่านผิดเกินกำหนด ระบบระงับการเข้าสู่ระบบชั่วคราว ${LOCKOUT_DURATION_SEC} วินาที เพื่อความปลอดภัย`
+        );
       } else {
         const remainingTries = MAX_FAILED_ATTEMPTS - nextCount;
         setError(
@@ -162,7 +204,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
       return;
     }
 
-    // Login successful - Reset brute force counters
+    // Offline login successful
     setFailedCount(0);
     try {
       sessionStorage.removeItem("pasaya_login_failed_count");
@@ -171,7 +213,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
       // ignore
     }
 
-    // Save username if rememberMe is checked
     if (rememberMe) {
       localStorage.setItem("pasaya_saved_username", cleanUsername);
     } else {
@@ -190,10 +231,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         {/* Brand Header */}
         <div className="text-center space-y-2">
           <div className="w-14 h-14 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center mx-auto shadow-md shadow-amber-500/20 font-black text-2xl tracking-wider">
-            P
+            A
           </div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-            PASAYA STOCK
+            Accessories Stock
           </h1>
           <p className="text-xs text-slate-500">
             ระบบจัดการสต็อก & รายการเบิกจ่ายสินค้า (Google Sheets Sync)
@@ -233,7 +274,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 type="text"
                 autoFocus
                 autoComplete="username"
-                disabled={isLocked}
+                disabled={isLocked || isSubmitting}
                 value={username}
                 onChange={(e) => {
                   setUsername(e.target.value);
@@ -255,7 +296,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               <input
                 type={showPassword ? "text" : "password"}
                 autoComplete="current-password"
-                disabled={isLocked}
+                disabled={isLocked || isSubmitting}
                 value={password}
                 onChange={(e) => {
                   setPassword(e.target.value);
@@ -285,12 +326,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
             <label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer select-none">
               <input
                 type="checkbox"
-                disabled={isLocked}
+                disabled={isLocked || isSubmitting}
                 checked={rememberMe}
                 onChange={(e) => setRememberMe(e.target.checked)}
                 className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500 cursor-pointer disabled:opacity-50"
               />
-              <span>จดจำการเข้าสู่ระบบในอุปกรณ์นี้ (ไม่ต้อง Log in ซ้ำ)</span>
+              <span>จดจำการเข้าสู่ระบบในอุปกรณ์นี้</span>
             </label>
           </div>
 
@@ -300,8 +341,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
             disabled={isSubmitting || isLocked}
             className="w-full py-3.5 rounded-2xl bg-amber-500 hover:bg-amber-400 active:scale-[0.99] text-slate-950 font-bold text-sm shadow-md shadow-amber-500/20 transition cursor-pointer flex items-center justify-center gap-2 mt-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <LogIn className="w-4 h-4" />
-            <span>{isLocked ? `ระบบถูกระงับ (${lockoutRemaining}s)` : "เข้าสู่ระบบ (Log in)"}</span>
+            {isSubmitting ? (
+              <span className="inline-flex items-center gap-2">
+                <span className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin"></span>
+                กำลังตรวจสอบ...
+              </span>
+            ) : (
+              <>
+                <LogIn className="w-4 h-4" />
+                <span>
+                  {isLocked
+                    ? `ระบบถูกระงับ (${lockoutRemaining}s)`
+                    : "เข้าสู่ระบบ (Log in)"}
+                </span>
+              </>
+            )}
           </button>
         </form>
 

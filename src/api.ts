@@ -209,6 +209,24 @@ export async function saveTransactionOnline(tx: Transaction): Promise<{ success:
   }
 }
 
+export async function loginOnline(username: string, password: string): Promise<{ success: boolean; employee?: Employee; allEmployees?: Employee[]; error?: string }> {
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      return data;
+    }
+    return { success: false, error: data.error || "เข้าสู่ระบบไม่สำเร็จ" };
+  } catch (err: any) {
+    console.warn("Server login request failed:", err);
+    return { success: false, error: err.message || "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้" };
+  }
+}
+
 export async function fetchEmployeesOnline(): Promise<Employee[] | null> {
   try {
     const res = await fetch("/api/employees");

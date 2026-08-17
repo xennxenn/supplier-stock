@@ -257,12 +257,12 @@ export const StockListView: React.FC<StockListViewProps> = ({
 
   const handleExportCSV = () => {
     const { headers, rows } = getExportData();
-    exportToCSV("PASAYA_STOCK_MASTER", headers, rows);
+    exportToCSV("ACCESSORIES_STOCK_MASTER", headers, rows);
   };
 
   const handleExportExcel = () => {
     const { headers, rows } = getExportData();
-    exportToExcel("PASAYA_STOCK_MASTER", "StockMaster", headers, rows);
+    exportToExcel("ACCESSORIES_STOCK_MASTER", "StockMaster", headers, rows);
   };
 
   return (

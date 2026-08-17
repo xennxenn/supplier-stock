@@ -133,11 +133,33 @@ export default function App() {
         showToast("เกิดข้อผิดพลาดในการเชื่อมต่อ Google Sheets", "error");
       }
     } finally {
-      if (!silent) setIsSyncing(false);
+      setIsSyncing(false);
     }
   }, []);
 
-  // Initial load & smart merge for persistent employees
+  // Sync employees with server across all devices
+  const syncEmployees = useCallback(async () => {
+    try {
+      const serverEmps = await fetchEmployeesOnline();
+      if (serverEmps && Array.isArray(serverEmps) && serverEmps.length > 0) {
+        setEmployees(serverEmps);
+        localStorage.setItem("pasaya_stock_employees", JSON.stringify(serverEmps));
+        setCurrentUser((prev) => {
+          if (!prev) return null;
+          const updatedSelf = serverEmps.find((e) => e.id === prev.id);
+          if (!updatedSelf) return prev;
+          if (JSON.stringify(prev) !== JSON.stringify(updatedSelf)) {
+            return updatedSelf;
+          }
+          return prev;
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to sync employees from server:", e);
+    }
+  }, []);
+
+  // Initial load & periodic background sync
   useEffect(() => {
     // Check local cache first
     try {
@@ -155,46 +177,32 @@ export default function App() {
       console.warn("Failed to load local cache", e);
     }
 
-    // Fetch shared employees from persistent server & smart merge to prevent data loss
-    fetchEmployeesOnline().then((serverEmps) => {
-      if (serverEmps && serverEmps.length > 0) {
-        setEmployees((prevLocal) => {
-          const map = new Map<string, Employee>();
-          INITIAL_EMPLOYEES.forEach((e) => map.set(e.id, e));
-          prevLocal.forEach((e) => map.set(e.id, e));
-          serverEmps.forEach((e) => map.set(e.id, e));
-
-          const merged = Array.from(map.values()).map((emp) => {
-            if (emp.id === "emp_admin") {
-              const defaultAdmin = INITIAL_EMPLOYEES.find((x) => x.id === "emp_admin");
-              if (defaultAdmin) {
-                return { ...emp, username: defaultAdmin.username, password: defaultAdmin.password, pin: defaultAdmin.pin, employeeCode: defaultAdmin.employeeCode };
-              }
-            }
-            return emp;
-          });
-          localStorage.setItem("pasaya_stock_employees", JSON.stringify(merged));
-
-          // If there are local additions not present on server, sync up
-          if (merged.length > serverEmps.length) {
-            saveEmployeesOnline(merged).catch(console.warn);
-          }
-
-          return merged;
-        });
-      }
-    });
-
-    // Trigger initial sync
+    // Initial server fetch
+    syncEmployees();
     performSync(false);
 
-    // Periodic auto-sync every 45 seconds
-    const timer = setInterval(() => {
+    // Periodic background sync
+    const sheetsTimer = setInterval(() => {
       performSync(false, true);
     }, 45000);
 
-    return () => clearInterval(timer);
-  }, [performSync]);
+    const empTimer = setInterval(() => {
+      syncEmployees();
+    }, 30000);
+
+    // Sync on window/tab focus
+    const handleFocus = () => {
+      syncEmployees();
+      performSync(false, true);
+    };
+    window.addEventListener("focus", handleFocus);
+
+    return () => {
+      clearInterval(sheetsTimer);
+      clearInterval(empTimer);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [performSync, syncEmployees]);
 
   // Tab permission guard: If current user doesn't have permission to view activeTab, auto-redirect
   useEffect(() => {
@@ -372,8 +380,16 @@ export default function App() {
     (i) => i.currentBalance <= i.minStock && i.minStock > 0
   ).length;
 
-  const handleLoginSuccess = (emp: Employee, remember: boolean) => {
+  const handleLoginSuccess = (
+    emp: Employee,
+    remember: boolean,
+    allEmps?: Employee[]
+  ) => {
     setCurrentUser(emp);
+    if (allEmps && allEmps.length > 0) {
+      setEmployees(allEmps);
+      localStorage.setItem("pasaya_stock_employees", JSON.stringify(allEmps));
+    }
     if (remember) {
       localStorage.setItem("pasaya_current_user", JSON.stringify(emp));
     } else {
@@ -395,6 +411,10 @@ export default function App() {
       <LoginScreen
         employees={employees}
         onLogin={handleLoginSuccess}
+        onSyncEmployees={(liveEmps) => {
+          setEmployees(liveEmps);
+          localStorage.setItem("pasaya_stock_employees", JSON.stringify(liveEmps));
+        }}
       />
     );
   }

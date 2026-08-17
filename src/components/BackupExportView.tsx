@@ -90,7 +90,7 @@ export const BackupExportView: React.FC<BackupExportViewProps> = ({
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `PASAYA_STOCK_BACKUP_${new Date(backup.ts)
+    link.download = `ACCESSORIES_STOCK_BACKUP_${new Date(backup.ts)
       .toISOString()
       .slice(0, 19)
       .replace(/:/g, "-")}.json`;
