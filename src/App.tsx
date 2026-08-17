@@ -25,6 +25,7 @@ import type {
   BackupEntry,
   NavTab,
 } from "./types";
+import { INITIAL_EMPLOYEES } from "./data/defaultEmployees";
 import {
   getScopedStockItems,
   getScopedTransactions,
@@ -32,90 +33,6 @@ import {
   hasPermission,
 } from "./utils/permissionUtils";
 import { RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
-
-const INITIAL_EMPLOYEES: Employee[] = [
-  {
-    id: "emp_admin",
-    name: "ผู้ดูแลระบบ (Admin)",
-    username: "admin",
-    password: "password",
-    pin: "1234",
-    role: "admin",
-    department: "คลังสินค้าและสารสนเทศ",
-    employeeCode: "ADMIN01",
-    allowedLines: [],
-    allowedSuppliers: [],
-    perms: {
-      view: true,
-      viewDashboard: true,
-      viewStock: true,
-      viewTransactions: true,
-      receive: true,
-      issue: true,
-      viewAlerts: true,
-      viewForecast: true,
-      addItem: true,
-      importExport: true,
-      reports: true,
-      employees: true,
-      backup: true,
-    },
-  },
-  {
-    id: "emp_lawan",
-    name: "ลาวัลย์ ไยยธรรม (วัลย์)",
-    username: "lawan",
-    password: "password",
-    pin: "5102",
-    role: "manager",
-    department: "แพ็ค / คลังวัตถุดิบ",
-    employeeCode: "510220",
-    allowedLines: ["แพ็ค", "คลังวัตถุดิบ", "ทอผ้า"],
-    allowedSuppliers: [],
-    perms: {
-      view: true,
-      viewDashboard: true,
-      viewStock: true,
-      viewTransactions: true,
-      receive: true,
-      issue: true,
-      viewAlerts: true,
-      viewForecast: true,
-      addItem: true,
-      importExport: true,
-      reports: true,
-      employees: false,
-      backup: false,
-    },
-  },
-  {
-    id: "emp_staff",
-    name: "เจ้าหน้าที่คลังสินค้า (Staff)",
-    username: "staff",
-    password: "password",
-    pin: "9999",
-    role: "staff",
-    department: "คลังสินค้าทั่วไป",
-    employeeCode: "STF001",
-    allowedLines: ["แพ็ค"],
-    allowedSuppliers: [],
-    perms: {
-      view: true,
-      viewDashboard: true,
-      viewStock: true,
-      viewTransactions: true,
-      receive: true,
-      issue: true,
-      viewAlerts: true,
-      viewForecast: true,
-      addItem: false,
-      importExport: false,
-      reports: false,
-      employees: false,
-      backup: false,
-    },
-  },
-];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
@@ -130,7 +47,20 @@ export default function App() {
   const [employees, setEmployees] = useState<Employee[]>(() => {
     try {
       const saved = localStorage.getItem("pasaya_stock_employees");
-      return saved ? JSON.parse(saved) : INITIAL_EMPLOYEES;
+      if (saved) {
+        const parsed: Employee[] = JSON.parse(saved);
+        // Ensure standard admin has the current updated credentials
+        return parsed.map((emp) => {
+          if (emp.id === "emp_admin") {
+            const defaultAdmin = INITIAL_EMPLOYEES.find((x) => x.id === "emp_admin");
+            if (defaultAdmin) {
+              return { ...emp, username: defaultAdmin.username, password: defaultAdmin.password, pin: defaultAdmin.pin, employeeCode: defaultAdmin.employeeCode };
+            }
+          }
+          return emp;
+        });
+      }
+      return INITIAL_EMPLOYEES;
     } catch {
       return INITIAL_EMPLOYEES;
     }
@@ -143,10 +73,15 @@ export default function App() {
         const parsed = JSON.parse(saved);
         if (parsed && parsed.id) return parsed;
       }
+      const sessionSaved = sessionStorage.getItem("pasaya_current_user");
+      if (sessionSaved) {
+        const parsed = JSON.parse(sessionSaved);
+        if (parsed && parsed.id) return parsed;
+      }
     } catch {
       // ignore
     }
-    return INITIAL_EMPLOYEES[0]; // Default logged in for instant preview
+    return null; // Require login on new devices / unauthenticated browsers
   });
 
   // Modals & UI States
@@ -229,7 +164,15 @@ export default function App() {
           prevLocal.forEach((e) => map.set(e.id, e));
           serverEmps.forEach((e) => map.set(e.id, e));
 
-          const merged = Array.from(map.values());
+          const merged = Array.from(map.values()).map((emp) => {
+            if (emp.id === "emp_admin") {
+              const defaultAdmin = INITIAL_EMPLOYEES.find((x) => x.id === "emp_admin");
+              if (defaultAdmin) {
+                return { ...emp, username: defaultAdmin.username, password: defaultAdmin.password, pin: defaultAdmin.pin, employeeCode: defaultAdmin.employeeCode };
+              }
+            }
+            return emp;
+          });
           localStorage.setItem("pasaya_stock_employees", JSON.stringify(merged));
 
           // If there are local additions not present on server, sync up
