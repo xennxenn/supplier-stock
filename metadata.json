@@ -1,0 +1,6 @@
+{
+  "name": "Pasaya Stock",
+  "description": "ระบบจัดการสต็อกสินค้าและรายการเบิกจ่าย เชื่อมต่อข้อมูล Google Sheets อัตโนมัติ",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
