@@ -25,6 +25,12 @@ import type {
   BackupEntry,
   NavTab,
 } from "./types";
+import {
+  getScopedStockItems,
+  getScopedTransactions,
+  canAccessTab,
+  hasPermission,
+} from "./utils/permissionUtils";
 import { RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
 
 const INITIAL_EMPLOYEES: Employee[] = [
@@ -41,8 +47,13 @@ const INITIAL_EMPLOYEES: Employee[] = [
     allowedSuppliers: [],
     perms: {
       view: true,
+      viewDashboard: true,
+      viewStock: true,
+      viewTransactions: true,
       receive: true,
       issue: true,
+      viewAlerts: true,
+      viewForecast: true,
       addItem: true,
       importExport: true,
       reports: true,
@@ -63,8 +74,13 @@ const INITIAL_EMPLOYEES: Employee[] = [
     allowedSuppliers: [],
     perms: {
       view: true,
+      viewDashboard: true,
+      viewStock: true,
+      viewTransactions: true,
       receive: true,
       issue: true,
+      viewAlerts: true,
+      viewForecast: true,
       addItem: true,
       importExport: true,
       reports: true,
@@ -85,8 +101,13 @@ const INITIAL_EMPLOYEES: Employee[] = [
     allowedSuppliers: [],
     perms: {
       view: true,
+      viewDashboard: true,
+      viewStock: true,
+      viewTransactions: true,
       receive: true,
       issue: true,
+      viewAlerts: true,
+      viewForecast: true,
       addItem: false,
       importExport: false,
       reports: false,
@@ -143,10 +164,10 @@ export default function App() {
 
   const showToast = (message: string, type: "ok" | "error" = "ok") => {
     setToast({ type, message });
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), 3500);
   };
 
-  // Sync data from Google Sheets / Central Server
+  // Sync with Google Sheets
   const performSync = useCallback(async (force = false, silent = false) => {
     if (!silent) setIsSyncing(true);
     setSyncError(null);
@@ -181,7 +202,7 @@ export default function App() {
     }
   }, []);
 
-  // Initial load
+  // Initial load & smart merge for persistent employees
   useEffect(() => {
     // Check local cache first
     try {
@@ -199,24 +220,60 @@ export default function App() {
       console.warn("Failed to load local cache", e);
     }
 
-    // Fetch shared employees from persistent server
+    // Fetch shared employees from persistent server & smart merge to prevent data loss
     fetchEmployeesOnline().then((serverEmps) => {
       if (serverEmps && serverEmps.length > 0) {
-        setEmployees(serverEmps);
-        localStorage.setItem("pasaya_stock_employees", JSON.stringify(serverEmps));
+        setEmployees((prevLocal) => {
+          const map = new Map<string, Employee>();
+          INITIAL_EMPLOYEES.forEach((e) => map.set(e.id, e));
+          prevLocal.forEach((e) => map.set(e.id, e));
+          serverEmps.forEach((e) => map.set(e.id, e));
+
+          const merged = Array.from(map.values());
+          localStorage.setItem("pasaya_stock_employees", JSON.stringify(merged));
+
+          // If there are local additions not present on server, sync up
+          if (merged.length > serverEmps.length) {
+            saveEmployeesOnline(merged).catch(console.warn);
+          }
+
+          return merged;
+        });
       }
     });
 
     // Trigger initial sync
     performSync(false);
 
-    // Periodic auto-sync every 45 seconds to keep all users & devices in shared live state
+    // Periodic auto-sync every 45 seconds
     const timer = setInterval(() => {
       performSync(false, true);
     }, 45000);
 
     return () => clearInterval(timer);
   }, [performSync]);
+
+  // Tab permission guard: If current user doesn't have permission to view activeTab, auto-redirect
+  useEffect(() => {
+    if (!currentUser) return;
+    if (!canAccessTab(currentUser, activeTab)) {
+      const allTabs: NavTab[] = [
+        "dashboard",
+        "stock",
+        "transactions",
+        "movement",
+        "alerts",
+        "forecast",
+        "reports",
+        "employees",
+        "backup",
+      ];
+      const firstAllowed = allTabs.find((t) => canAccessTab(currentUser, t));
+      if (firstAllowed) {
+        setActiveTab(firstAllowed);
+      }
+    }
+  }, [currentUser, activeTab]);
 
   // Handle saving employees (Persisted both to server and localStorage)
   const handleSaveEmployees = async (newEmps: Employee[]) => {
@@ -235,15 +292,36 @@ export default function App() {
     showToast("บันทึกข้อมูลพนักงานเรียบร้อยแล้ว (ซิงค์ทุกเครื่อง)");
   };
 
-  // Quick action from table or modal to record movement
+  // Quick action from table or modal to record movement (With strict permission check)
   const handleQuickMove = (item: StockItem, type: "in" | "out") => {
+    if (type === "in" && !hasPermission(currentUser, "receive")) {
+      showToast("คุณไม่มีสิทธิ์บันทึกรับเข้าสินค้า", "error");
+      return;
+    }
+    if (type === "out" && !hasPermission(currentUser, "issue")) {
+      showToast("คุณไม่มีสิทธิ์บันทึกเบิกจ่ายสินค้า", "error");
+      return;
+    }
+
     setSelectedDetailItem(null);
     setMovePrefill({ item, type });
     setActiveTab("movement");
   };
 
-  // Record a new transaction (In or Out)
+  // Record a new transaction (In or Out) with strict permission checks
   const handleRecordTransaction = async (txData: Partial<Transaction>) => {
+    const isOut = (txData.qtyOut || 0) > 0 || txData.type === "out";
+    const isIn = (txData.qtyIn || 0) > 0 || txData.type === "in";
+
+    if (isOut && !hasPermission(currentUser, "issue")) {
+      showToast("คุณไม่มีสิทธิ์บันทึกเบิกจ่ายสินค้า", "error");
+      return;
+    }
+    if (isIn && !hasPermission(currentUser, "receive")) {
+      showToast("คุณไม่มีสิทธิ์บันทึกรับเข้าสินค้า", "error");
+      return;
+    }
+
     const newTx: Transaction = {
       id: `tx_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       date: txData.date || new Date().toISOString().slice(0, 10),
@@ -252,8 +330,8 @@ export default function App() {
       unit: txData.unit || "ชิ้น",
       qtyIn: txData.qtyIn || 0,
       qtyOut: txData.qtyOut || 0,
-      employeeId: txData.employeeId || "",
-      employeeName: txData.employeeName || "",
+      employeeId: txData.employeeId || currentUser?.id || "",
+      employeeName: txData.employeeName || currentUser?.name || "",
       line: txData.line || "",
       unitPrice: txData.unitPrice || 0,
       totalCost: txData.totalCost || 0,
@@ -287,7 +365,7 @@ export default function App() {
       })
     );
 
-    // Save online to centralized server so all devices share this record immediately
+    // Save online to centralized server
     try {
       await saveTransactionOnline(newTx);
     } catch (e) {
@@ -299,16 +377,14 @@ export default function App() {
 
   // Restore snapshot backup
   const handleRestoreBackup = (backup: BackupEntry) => {
-    if (backup.data?.items) setItems(backup.data.items);
-    if (backup.data?.txs) setTransactions(backup.data.txs);
-    showToast(`กู้คืนข้อมูลสำเร็จ (${backup.itemsCount} รายการสต็อก)`);
+    if (backup.data?.items && backup.data.items.length > 0) {
+      setItems(backup.data.items);
+      setTransactions(backup.data.txs || []);
+      showToast(`กู้คืนข้อมูลจากสำรอง (${new Date(backup.ts).toLocaleString("th-TH")}) สำเร็จ!`);
+    }
   };
 
-  // Extract all unique categories, lines, and suppliers from master items
-  const allUniqueCategories = useMemo(
-    () => Array.from(new Set(items.map((i) => i.category).filter(Boolean))).sort(),
-    [items]
-  );
+  // Global All Lines & Suppliers (for employee editing configuration)
   const allUniqueLines = useMemo(
     () => Array.from(new Set(items.map((i) => i.line).filter(Boolean))).sort(),
     [items]
@@ -320,66 +396,12 @@ export default function App() {
 
   // Scoped Stock Items based on currentUser line and supplier permissions
   const scopedItems = useMemo(() => {
-    if (!currentUser || currentUser.role === "admin") return items;
-
-    let res = items;
-    // Check if line restrictions apply
-    if (
-      currentUser.allowedLines &&
-      currentUser.allowedLines.length > 0 &&
-      !currentUser.allowedLines.includes("ALL")
-    ) {
-      res = res.filter(
-        (it) => !it.line || currentUser.allowedLines!.includes(it.line)
-      );
-    }
-
-    // Check if supplier restrictions apply
-    if (
-      currentUser.allowedSuppliers &&
-      currentUser.allowedSuppliers.length > 0 &&
-      !currentUser.allowedSuppliers.includes("ALL")
-    ) {
-      res = res.filter(
-        (it) => !it.supplier || currentUser.allowedSuppliers!.includes(it.supplier)
-      );
-    }
-
-    return res;
+    return getScopedStockItems(items, currentUser);
   }, [items, currentUser]);
 
   // Scoped Transactions based on currentUser line and supplier permissions
   const scopedTransactions = useMemo(() => {
-    if (!currentUser || currentUser.role === "admin") return transactions;
-
-    // Create item to supplier lookup
-    const itemSupplierMap = new Map(
-      items.map((it) => [it.barcode.trim().toLowerCase(), it.supplier])
-    );
-
-    let res = transactions;
-    if (
-      currentUser.allowedLines &&
-      currentUser.allowedLines.length > 0 &&
-      !currentUser.allowedLines.includes("ALL")
-    ) {
-      res = res.filter(
-        (t) => !t.line || currentUser.allowedLines!.includes(t.line)
-      );
-    }
-
-    if (
-      currentUser.allowedSuppliers &&
-      currentUser.allowedSuppliers.length > 0 &&
-      !currentUser.allowedSuppliers.includes("ALL")
-    ) {
-      res = res.filter((t) => {
-        const sup = itemSupplierMap.get(t.barcode.trim().toLowerCase());
-        return !sup || currentUser.allowedSuppliers!.includes(sup);
-      });
-    }
-
-    return res;
+    return getScopedTransactions(transactions, items, currentUser);
   }, [transactions, items, currentUser]);
 
   // Scoped unique lines for dropdown filter options
@@ -532,6 +554,7 @@ export default function App() {
         {activeTab === "stock" && (
           <StockListView
             items={scopedItems}
+            currentUser={currentUser}
             onSelectItem={(item) => setSelectedDetailItem(item)}
             onQuickMove={handleQuickMove}
             categories={uniqueCategories}
@@ -544,6 +567,7 @@ export default function App() {
             transactions={scopedTransactions}
             lines={uniqueLines}
             stockItems={scopedItems}
+            currentUser={currentUser}
           />
         )}
 
@@ -562,6 +586,7 @@ export default function App() {
           <LowStockAlertsView
             items={scopedItems}
             lines={uniqueLines}
+            currentUser={currentUser}
             onSelectItem={(item) => setSelectedDetailItem(item)}
             onQuickMove={handleQuickMove}
           />
@@ -573,6 +598,7 @@ export default function App() {
             transactions={scopedTransactions}
             lines={uniqueLines}
             categories={uniqueCategories}
+            currentUser={currentUser}
             onSelectItem={(item) => setSelectedDetailItem(item)}
             onQuickMove={handleQuickMove}
           />
@@ -583,6 +609,7 @@ export default function App() {
             data={syncData}
             items={scopedItems}
             transactions={scopedTransactions}
+            currentUser={currentUser}
           />
         )}
 
@@ -612,6 +639,7 @@ export default function App() {
       {selectedDetailItem && (
         <ItemDetailModal
           item={selectedDetailItem}
+          currentUser={currentUser}
           onClose={() => setSelectedDetailItem(null)}
           transactions={transactions}
           onQuickMove={handleQuickMove}

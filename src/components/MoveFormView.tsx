@@ -10,8 +10,10 @@ import {
   User,
   Layers,
   Sparkles,
+  Lock,
 } from "lucide-react";
 import type { StockItem, Transaction, Employee } from "../types";
+import { hasPermission } from "../utils/permissionUtils";
 
 interface MoveFormViewProps {
   items: StockItem[];
@@ -30,7 +32,18 @@ export const MoveFormView: React.FC<MoveFormViewProps> = ({
   onRecordTransaction,
   onClearInitial,
 }) => {
-  const [moveType, setMoveType] = useState<"in" | "out">(initialType);
+  const canReceive = hasPermission(currentUser, "receive");
+  const canIssue = hasPermission(currentUser, "issue");
+
+  // Determine valid initial move type based on user permissions
+  const defaultMoveType: "in" | "out" =
+    canReceive && !canIssue
+      ? "in"
+      : !canReceive && canIssue
+      ? "out"
+      : (initialType === "in" ? "in" : "out");
+
+  const [moveType, setMoveType] = useState<"in" | "out">(defaultMoveType);
   const [selectedBarcode, setSelectedBarcode] = useState(initialItem?.barcode || "");
   const [searchTerm, setSearchTerm] = useState("");
   const [isSearching, setIsSearching] = useState(false);
@@ -50,6 +63,15 @@ export const MoveFormView: React.FC<MoveFormViewProps> = ({
     }
   }, [initialItem]);
 
+  useEffect(() => {
+    // Keep moveType strictly aligned if permissions don't allow current selection
+    if (moveType === "in" && !canReceive && canIssue) {
+      setMoveType("out");
+    } else if (moveType === "out" && !canIssue && canReceive) {
+      setMoveType("in");
+    }
+  }, [canReceive, canIssue, moveType]);
+
   // Autocomplete search
   const filteredSuggestions = items
     .filter(
@@ -61,6 +83,15 @@ export const MoveFormView: React.FC<MoveFormViewProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (moveType === "in" && !canReceive) {
+      alert("คุณไม่มีสิทธิ์บันทึกรับเข้าสินค้า (Receive Restricted)");
+      return;
+    }
+    if (moveType === "out" && !canIssue) {
+      alert("คุณไม่มีสิทธิ์บันทึกเบิกจ่ายสินค้า (Issue Restricted)");
+      return;
+    }
+
     if (!activeItem) {
       alert("กรุณาเลือกรายการสินค้า");
       return;
@@ -143,33 +174,49 @@ export const MoveFormView: React.FC<MoveFormViewProps> = ({
           </div>
 
           <div className="flex bg-slate-100 p-1 rounded-xl">
-            <button
-              type="button"
-              onClick={() => setMoveType("in")}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
-                moveType === "in"
-                  ? "bg-emerald-600 text-white shadow-sm"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <PlusCircle className="w-4 h-4" />
-              <span>รับเข้า (Inflow)</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setMoveType("out")}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
-                moveType === "out"
-                  ? "bg-rose-600 text-white shadow-sm"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <MinusCircle className="w-4 h-4" />
-              <span>จ่ายออก (Outflow)</span>
-            </button>
+            {canReceive && (
+              <button
+                type="button"
+                onClick={() => setMoveType("in")}
+                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  moveType === "in"
+                    ? "bg-emerald-600 text-white shadow-sm"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                <PlusCircle className="w-4 h-4" />
+                <span>รับเข้า (Inflow)</span>
+              </button>
+            )}
+            {canIssue && (
+              <button
+                type="button"
+                onClick={() => setMoveType("out")}
+                className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  moveType === "out"
+                    ? "bg-rose-600 text-white shadow-sm"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                <MinusCircle className="w-4 h-4" />
+                <span>จ่ายออก (Outflow)</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
+
+      {/* No Permission Warning */}
+      {!canReceive && !canIssue && (
+        <div className="p-6 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-center space-y-2">
+          <Lock className="w-8 h-8 text-rose-500 mx-auto" />
+          <h3 className="text-sm font-bold">จำกัดสิทธิ์การเข้าใช้งานโมดูลรับเข้า-เบิกจ่าย</h3>
+          <p className="text-xs text-rose-600">
+            บัญชีของคุณไม่มีสิทธิ์ในการบันทึกรับเข้าสินค้า (Receive) หรือบันทึกเบิกจ่ายสินค้า (Issue)
+            กรุณาติดต่อผู้ดูแลระบบ (Admin) เพื่อขอสิทธิ์การใช้งาน
+          </p>
+        </div>
+      )}
 
       {/* Success Notification */}
       {successMsg && (
@@ -179,7 +226,8 @@ export const MoveFormView: React.FC<MoveFormViewProps> = ({
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="space-y-6">
+      {(canReceive || canIssue) && (
+        <form onSubmit={handleSubmit} className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Left Column: Item Selection & Details */}
           <div className="md:col-span-2 space-y-4">
@@ -404,6 +452,7 @@ export const MoveFormView: React.FC<MoveFormViewProps> = ({
           </div>
         </div>
       </form>
+      )}
     </div>
   );
 };

@@ -17,13 +17,15 @@ import {
   ArrowDown,
   FileDown,
 } from "lucide-react";
-import type { Transaction, StockItem } from "../types";
+import type { Transaction, StockItem, Employee } from "../types";
 import { exportToExcel, exportToCSV, parseFlexibleDate } from "../utils/exportUtils";
+import { hasPermission } from "../utils/permissionUtils";
 
 interface TransactionsViewProps {
   transactions: Transaction[];
   lines: string[];
   stockItems?: StockItem[];
+  currentUser?: Employee;
 }
 
 type SortField =
@@ -43,6 +45,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
   transactions,
   lines,
   stockItems = [],
+  currentUser,
 }) => {
   const [search, setSearch] = useState("");
   const [selectedType, setSelectedType] = useState<"all" | "in" | "out">("all");
@@ -304,24 +307,26 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleExportExcel}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer"
-            title="ส่งออกไฟล์ Excel (.xlsx) ตามเงื่อนไขที่กรองไว้"
-          >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span>ส่งออก Excel (.xlsx)</span>
-          </button>
-          <button
-            onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition cursor-pointer"
-            title="ส่งออกไฟล์ CSV (.csv) ตามเงื่อนไขที่กรองไว้"
-          >
-            <Download className="w-4 h-4" />
-            <span>ส่งออก CSV</span>
-          </button>
-        </div>
+        {hasPermission(currentUser, "importExport") && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleExportExcel}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer"
+              title="ส่งออกไฟล์ Excel (.xlsx) ตามเงื่อนไขที่กรองไว้"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>ส่งออก Excel (.xlsx)</span>
+            </button>
+            <button
+              onClick={handleExportCSV}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition cursor-pointer"
+              title="ส่งออกไฟล์ CSV (.csv) ตามเงื่อนไขที่กรองไว้"
+            >
+              <Download className="w-4 h-4" />
+              <span>ส่งออก CSV</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Summary KPI Badges */}

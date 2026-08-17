@@ -24,13 +24,15 @@ import {
   Pie,
   Cell,
 } from "recharts";
-import type { StockItem, Transaction, SheetsSyncData } from "../types";
+import type { StockItem, Transaction, SheetsSyncData, Employee } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
+import { hasPermission } from "../utils/permissionUtils";
 
 interface ReportsViewProps {
   data: SheetsSyncData | null;
   items: StockItem[];
   transactions: Transaction[];
+  currentUser?: Employee;
 }
 
 const COLORS = [
@@ -48,6 +50,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   data,
   items,
   transactions,
+  currentUser,
 }) => {
   const [reportTab, setReportTab] = useState<"monthly" | "lines" | "suppliers">("monthly");
 
@@ -200,22 +203,26 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleExportExcel}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer"
-            title="ส่งออกรายงานเป็น Excel (.xlsx)"
-          >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span>ส่งออก Excel</span>
-          </button>
-          <button
-            onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition cursor-pointer"
-            title="ส่งออกรายงานเป็น CSV (.csv)"
-          >
-            <Download className="w-4 h-4" />
-            <span>ส่งออก CSV</span>
-          </button>
+          {hasPermission(currentUser, "importExport") && (
+            <>
+              <button
+                onClick={handleExportExcel}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer"
+                title="ส่งออกรายงานเป็น Excel (.xlsx)"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>ส่งออก Excel</span>
+              </button>
+              <button
+                onClick={handleExportCSV}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition cursor-pointer"
+                title="ส่งออกรายงานเป็น CSV (.csv)"
+              >
+                <Download className="w-4 h-4" />
+                <span>ส่งออก CSV</span>
+              </button>
+            </>
+          )}
           <button
             onClick={handlePrint}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition cursor-pointer"

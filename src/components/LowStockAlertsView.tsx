@@ -16,12 +16,14 @@ import {
   Coins,
   Boxes,
 } from "lucide-react";
-import type { StockItem } from "../types";
+import type { StockItem, Employee } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
+import { hasPermission } from "../utils/permissionUtils";
 
 interface LowStockAlertsViewProps {
   items: StockItem[];
   lines: string[];
+  currentUser?: Employee;
   onSelectItem: (item: StockItem) => void;
   onQuickMove: (item: StockItem, type: "in" | "out") => void;
 }
@@ -40,9 +42,12 @@ type LowStockSortField =
 export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
   items,
   lines,
+  currentUser,
   onSelectItem,
   onQuickMove,
 }) => {
+  const canReceive = hasPermission(currentUser, "receive");
+  const canExport = hasPermission(currentUser, "importExport");
   const [search, setSearch] = useState("");
   const [selectedLine, setSelectedLine] = useState("all");
   const [selectedCategory, setSelectedCategory] = useState("all");
@@ -241,24 +246,26 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleExportExcel}
-            className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition cursor-pointer"
-            title="ส่งออกใบสั่งซื้อ Excel (.xlsx)"
-          >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span>ส่งออก Excel</span>
-          </button>
-          <button
-            onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer"
-            title="ส่งออกใบสั่งซื้อ CSV (.csv)"
-          >
-            <Download className="w-4 h-4" />
-            <span>ส่งออก CSV</span>
-          </button>
-        </div>
+        {canExport && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleExportExcel}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition cursor-pointer"
+              title="ส่งออกใบสั่งซื้อ Excel (.xlsx)"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>ส่งออก Excel</span>
+            </button>
+            <button
+              onClick={handleExportCSV}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer"
+              title="ส่งออกใบสั่งซื้อ CSV (.csv)"
+            >
+              <Download className="w-4 h-4" />
+              <span>ส่งออก CSV</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Summary Stat Cards */}
@@ -560,12 +567,21 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
                         {it.supplier || "-"}
                       </td>
                       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          onClick={() => onQuickMove(it, "in")}
-                          className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition"
-                        >
-                          + รับเข้า
-                        </button>
+                        {canReceive ? (
+                          <button
+                            onClick={() => onQuickMove(it, "in")}
+                            className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer"
+                          >
+                            + รับเข้า
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => onSelectItem(it)}
+                            className="px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
+                          >
+                            ดูข้อมูล
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );

@@ -13,10 +13,12 @@ import {
   Copy,
   Check,
 } from "lucide-react";
-import type { StockItem, Transaction } from "../types";
+import type { StockItem, Transaction, Employee } from "../types";
+import { hasPermission } from "../utils/permissionUtils";
 
 interface ItemDetailModalProps {
   item: StockItem | null;
+  currentUser?: Employee;
   onClose: () => void;
   transactions?: Transaction[];
   onQuickMove?: (item: StockItem, type: "in" | "out") => void;
@@ -24,11 +26,14 @@ interface ItemDetailModalProps {
 
 export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
   item,
+  currentUser,
   onClose,
   transactions = [],
   onQuickMove,
 }) => {
   const [copied, setCopied] = React.useState(false);
+  const canReceive = hasPermission(currentUser, "receive");
+  const canIssue = hasPermission(currentUser, "issue");
 
   if (!item) return null;
 
@@ -120,20 +125,30 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
               </div>
             </div>
 
-            {onQuickMove && (
+            {onQuickMove && (canReceive || canIssue) && (
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => onQuickMove(item, "in")}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition"
-                >
-                  + รับเข้า
-                </button>
-                <button
-                  onClick={() => onQuickMove(item, "out")}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white shadow-sm transition"
-                >
-                  - จ่ายออก
-                </button>
+                {canReceive && (
+                  <button
+                    onClick={() => {
+                      onClose();
+                      onQuickMove(item, "in");
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer"
+                  >
+                    + รับเข้า
+                  </button>
+                )}
+                {canIssue && (
+                  <button
+                    onClick={() => {
+                      onClose();
+                      onQuickMove(item, "out");
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white shadow-sm transition cursor-pointer"
+                  >
+                    - จ่ายออก
+                  </button>
+                )}
               </div>
             )}
           </div>

@@ -8,7 +8,87 @@ import type { StockItem, Transaction, SheetsSyncData, Employee, BackupEntry } fr
 const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: "50mb" }));
+// Security: Disable X-Powered-By header to prevent fingerprinting
+app.disable("x-powered-by");
+
+// Security: Safe JSON payload limit (10MB) to mitigate memory exhaustion DoS
+app.use(express.json({ limit: "10mb" }));
+
+// Security Headers Middleware
+app.use((_req, res, next) => {
+  // Prevent MIME-sniffing
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  // Prevent clickjacking inside third-party frames
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  // Enable XSS filtering
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  // Referrer policy
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  // Restrict sensitive hardware features
+  res.setHeader("Permissions-Policy", "geolocation=(), camera=(), microphone=()");
+  next();
+});
+
+// Security: In-Memory IP Rate Limiter to prevent brute force & DoS
+interface RateLimitRecord {
+  count: number;
+  resetTime: number;
+}
+const ipRateLimits = new Map<string, RateLimitRecord>();
+
+// Clean up stale rate limits every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of ipRateLimits.entries()) {
+    if (now > record.resetTime) {
+      ipRateLimits.delete(ip);
+    }
+  }
+}, 5 * 60 * 1000);
+
+const rateLimiter = (maxRequests = 200, windowMs = 60 * 1000) => {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    const record = ipRateLimits.get(ip);
+
+    if (!record || now > record.resetTime) {
+      ipRateLimits.set(ip, { count: 1, resetTime: now + windowMs });
+      return next();
+    }
+
+    if (record.count >= maxRequests) {
+      const retryAfterSec = Math.ceil((record.resetTime - now) / 1000);
+      res.setHeader("Retry-After", retryAfterSec.toString());
+      return res.status(429).json({
+        success: false,
+        error: "Too many requests. Please try again later.",
+      });
+    }
+
+    record.count++;
+    next();
+  };
+};
+
+// Security: String Sanitization Helper (Strips HTML tags & malicious script injection vectors)
+function sanitizeText(val: unknown): string {
+  if (typeof val !== "string") return "";
+  return val
+    .replace(/<[^>]*>?/gm, "") // Strip HTML tags
+    .replace(/[<>'";&]/g, (c) => {
+      switch (c) {
+        case "<": return "&lt;";
+        case ">": return "&gt;";
+        case "'": return "&#39;";
+        case '"': return "&quot;";
+        case "&": return "&amp;";
+        case ";": return "";
+        default: return "";
+      }
+    })
+    .trim();
+}
 
 const STOCK_SHEET_URL =
   "https://docs.google.com/spreadsheets/d/e/2PACX-1vS9Fm4Y7_BJZcpoolwOFQD6u0Exz4DdbKuFeV5oSjEsL9Pe_P560uyN0bSw522woUtA-JCbsCHJQ5eU/pub?gid=380033643&single=true&output=csv";
@@ -44,8 +124,13 @@ const DEFAULT_EMPLOYEES: Employee[] = [
     allowedSuppliers: [],
     perms: {
       view: true,
+      viewDashboard: true,
+      viewStock: true,
+      viewTransactions: true,
       receive: true,
       issue: true,
+      viewAlerts: true,
+      viewForecast: true,
       addItem: true,
       importExport: true,
       reports: true,
@@ -66,8 +151,13 @@ const DEFAULT_EMPLOYEES: Employee[] = [
     allowedSuppliers: [],
     perms: {
       view: true,
+      viewDashboard: true,
+      viewStock: true,
+      viewTransactions: true,
       receive: true,
       issue: true,
+      viewAlerts: true,
+      viewForecast: true,
       addItem: true,
       importExport: true,
       reports: true,
@@ -76,11 +166,11 @@ const DEFAULT_EMPLOYEES: Employee[] = [
     },
   },
   {
-    id: "emp_staff_pack",
-    name: "เจ้าหน้าที่คลังแพ็ค",
-    username: "packing",
+    id: "emp_staff",
+    name: "เจ้าหน้าที่คลังสินค้า (Staff)",
+    username: "staff",
     password: "password",
-    pin: "0001",
+    pin: "9999",
     role: "staff",
     department: "คลังสินค้าทั่วไป",
     employeeCode: "STF001",
@@ -88,8 +178,13 @@ const DEFAULT_EMPLOYEES: Employee[] = [
     allowedSuppliers: [],
     perms: {
       view: true,
+      viewDashboard: true,
+      viewStock: true,
+      viewTransactions: true,
       receive: true,
       issue: true,
+      viewAlerts: true,
+      viewForecast: true,
       addItem: false,
       importExport: false,
       reports: false,
@@ -487,7 +582,7 @@ async function fetchAndParseSheets(force = false): Promise<SheetsSyncData> {
 
 // ---------------- API Routes ----------------
 
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", rateLimiter(120), (_req, res) => {
   res.json({
     status: "ok",
     uptime: process.uptime(),
@@ -496,7 +591,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 // Sync data from Google Sheets
-app.get("/api/sync-sheets", async (req, res) => {
+app.get("/api/sync-sheets", rateLimiter(60), async (req, res) => {
   try {
     const force = req.query.force === "true" || req.query.refresh === "1";
     const data = await fetchAndParseSheets(force);
@@ -512,7 +607,7 @@ app.get("/api/sync-sheets", async (req, res) => {
 });
 
 // Query all transactions with filtering and pagination
-app.get("/api/transactions", (req, res) => {
+app.get("/api/transactions", rateLimiter(150), (req, res) => {
   try {
     const {
       search = "",
@@ -528,7 +623,7 @@ app.get("/api/transactions", (req, res) => {
     let results = allTransactionsCache;
 
     if (search) {
-      const q = String(search).toLowerCase();
+      const q = String(search).toLowerCase().trim();
       results = results.filter(
         (t) =>
           t.barcode.toLowerCase().includes(q) ||
@@ -584,18 +679,49 @@ app.get("/api/transactions", (req, res) => {
   }
 });
 
-// POST new transaction (Shared online for all clients)
-app.post("/api/transactions", (req, res) => {
+// POST new transaction (Shared online for all clients with strict validation & sanitization)
+app.post("/api/transactions", rateLimiter(80), (req, res) => {
   try {
     const tx = req.body as Transaction;
     if (!tx || !tx.barcode) {
       return res.status(400).json({ success: false, error: "Missing transaction data or barcode" });
     }
 
+    const safeBarcode = sanitizeText(tx.barcode);
+    const safeItemName = sanitizeText(tx.itemName);
+    const safeLine = sanitizeText(tx.line);
+    const safeEmployeeName = sanitizeText(tx.employeeName);
+    const safeEmployeeId = sanitizeText(tx.employeeId);
+    const safeUnit = sanitizeText(tx.unit) || "ชิ้น";
+
+    const safeQtyIn = Math.max(0, parseNum(tx.qtyIn));
+    const safeQtyOut = Math.max(0, parseNum(tx.qtyOut));
+    const safeUnitPrice = Math.max(0, parseNum(tx.unitPrice));
+    const safeTotalCost = (safeQtyIn > 0 ? safeQtyIn : safeQtyOut) * safeUnitPrice;
+
+    if (safeQtyIn === 0 && safeQtyOut === 0) {
+      return res.status(400).json({ success: false, error: "Quantity must be greater than zero" });
+    }
+
     const newTx: Transaction = {
-      ...tx,
-      id: tx.id || `tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      date: tx.date || new Date().toISOString().slice(0, 10),
+      id: sanitizeText(tx.id) || `tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      date: sanitizeText(tx.date) || new Date().toISOString().slice(0, 10),
+      month: parseNum(tx.month) || new Date().getMonth() + 1,
+      year: parseNum(tx.year) || new Date().getFullYear(),
+      line: safeLine,
+      barcode: safeBarcode,
+      itemName: safeItemName,
+      unit: safeUnit,
+      qtyIn: safeQtyIn,
+      qtyOut: safeQtyOut,
+      employeeId: safeEmployeeId,
+      employeeName: safeEmployeeName,
+      unitPrice: safeUnitPrice,
+      totalCost: safeTotalCost,
+      balance: parseNum(tx.balance) || 0,
+      minStock: parseNum(tx.minStock) || 0,
+      status: "synced",
+      type: safeQtyIn > 0 ? "in" : "out",
     };
 
     // Prepend to server in-memory transactions cache
@@ -643,7 +769,7 @@ app.post("/api/transactions", (req, res) => {
 });
 
 // Employees Endpoints - Persistent Shared Storage
-app.get("/api/employees", (_req, res) => {
+app.get("/api/employees", rateLimiter(100), (_req, res) => {
   try {
     const emps = getStoredEmployees();
     res.json({ success: true, employees: emps });
@@ -652,21 +778,55 @@ app.get("/api/employees", (_req, res) => {
   }
 });
 
-app.post("/api/employees", (req, res) => {
+app.post("/api/employees", rateLimiter(40), (req, res) => {
   try {
-    const { employees: newEmps } = req.body;
-    if (!Array.isArray(newEmps) || newEmps.length === 0) {
+    const { employees: rawEmps } = req.body;
+    if (!Array.isArray(rawEmps) || rawEmps.length === 0) {
       return res.status(400).json({ success: false, error: "Invalid employees array" });
     }
-    saveStoredEmployees(newEmps);
-    res.json({ success: true, employees: newEmps });
+
+    // Sanitize employee entries to prevent malicious injection
+    const sanitizedEmps: Employee[] = rawEmps.map((e: any) => ({
+      id: sanitizeText(e.id) || `emp_${Date.now()}`,
+      name: sanitizeText(e.name),
+      username: sanitizeText(e.username).toLowerCase(),
+      password: String(e.password || "").trim(),
+      pin: String(e.pin || "").trim(),
+      role: (["admin", "manager", "staff"].includes(e.role) ? e.role : "staff") as any,
+      department: sanitizeText(e.department),
+      employeeCode: sanitizeText(e.employeeCode),
+      allowedLines: Array.isArray(e.allowedLines)
+        ? e.allowedLines.map((l: any) => sanitizeText(l)).filter(Boolean)
+        : [],
+      allowedSuppliers: Array.isArray(e.allowedSuppliers)
+        ? e.allowedSuppliers.map((s: any) => sanitizeText(s)).filter(Boolean)
+        : [],
+      perms: {
+        view: e.perms?.view !== false,
+        viewDashboard: e.perms?.viewDashboard !== false,
+        viewStock: e.perms?.viewStock !== false,
+        viewTransactions: Boolean(e.perms?.viewTransactions ?? e.perms?.view),
+        receive: Boolean(e.perms?.receive),
+        issue: Boolean(e.perms?.issue),
+        viewAlerts: Boolean(e.perms?.viewAlerts ?? e.perms?.view),
+        viewForecast: Boolean(e.perms?.viewForecast ?? e.perms?.view),
+        reports: Boolean(e.perms?.reports),
+        addItem: Boolean(e.perms?.addItem),
+        importExport: Boolean(e.perms?.importExport),
+        employees: Boolean(e.perms?.employees),
+        backup: Boolean(e.perms?.backup),
+      },
+    }));
+
+    saveStoredEmployees(sanitizedEmps);
+    res.json({ success: true, employees: sanitizedEmps });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // Backups Endpoints - Persistent Shared Storage
-app.get("/api/backups", (_req, res) => {
+app.get("/api/backups", rateLimiter(80), (_req, res) => {
   try {
     const backups = getStoredBackups();
     res.json({ success: true, backups });
@@ -675,7 +835,7 @@ app.get("/api/backups", (_req, res) => {
   }
 });
 
-app.post("/api/backups", (req, res) => {
+app.post("/api/backups", rateLimiter(30), (req, res) => {
   try {
     const backup = req.body as BackupEntry;
     if (!backup || !backup.id) {
@@ -690,7 +850,7 @@ app.post("/api/backups", (req, res) => {
   }
 });
 
-app.delete("/api/backups/:id", (req, res) => {
+app.delete("/api/backups/:id", rateLimiter(30), (req, res) => {
   try {
     const { id } = req.params;
     const current = getStoredBackups();
@@ -703,7 +863,7 @@ app.delete("/api/backups/:id", (req, res) => {
 });
 
 // GET status for light sync polling
-app.get("/api/sync-status", (_req, res) => {
+app.get("/api/sync-status", rateLimiter(120), (_req, res) => {
   res.json({
     success: true,
     lastSyncedAt: cachedData?.syncedAt || null,

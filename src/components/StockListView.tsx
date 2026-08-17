@@ -21,11 +21,13 @@ import {
   Coins,
   Boxes,
 } from "lucide-react";
-import type { StockItem } from "../types";
+import type { StockItem, Employee } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
+import { hasPermission } from "../utils/permissionUtils";
 
 interface StockListViewProps {
   items: StockItem[];
+  currentUser?: Employee;
   onSelectItem: (item: StockItem) => void;
   onQuickMove: (item: StockItem, type: "in" | "out") => void;
   categories: string[];
@@ -46,11 +48,15 @@ type StockSortField =
 
 export const StockListView: React.FC<StockListViewProps> = ({
   items,
+  currentUser,
   onSelectItem,
   onQuickMove,
   categories,
   lines,
 }) => {
+  const canReceive = hasPermission(currentUser, "receive");
+  const canIssue = hasPermission(currentUser, "issue");
+  const canExport = hasPermission(currentUser, "importExport");
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [selectedLine, setSelectedLine] = useState("all");
@@ -274,24 +280,26 @@ export const StockListView: React.FC<StockListViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleExportExcel}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer"
-            title="ส่งออก Excel (.xlsx) ตามเงื่อนไขที่กรองไว้"
-          >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span>ส่งออก Excel (.xlsx)</span>
-          </button>
-          <button
-            onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition cursor-pointer"
-            title="ส่งออก CSV (.csv) ตามเงื่อนไขที่กรองไว้"
-          >
-            <Download className="w-4 h-4" />
-            <span>ส่งออก CSV</span>
-          </button>
-        </div>
+        {canExport && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleExportExcel}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer"
+              title="ส่งออก Excel (.xlsx) ตามเงื่อนไขที่กรองไว้"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>ส่งออก Excel (.xlsx)</span>
+            </button>
+            <button
+              onClick={handleExportCSV}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition cursor-pointer"
+              title="ส่งออก CSV (.csv) ตามเงื่อนไขที่กรองไว้"
+            >
+              <Download className="w-4 h-4" />
+              <span>ส่งออก CSV</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Dynamic KPI summary cards that change with filter */}
@@ -720,23 +728,27 @@ export const StockListView: React.FC<StockListViewProps> = ({
                       </td>
                       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-center gap-1">
-                          <button
-                            onClick={() => onQuickMove(item, "in")}
-                            className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 transition"
-                            title="รับเข้าสต็อก"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => onQuickMove(item, "out")}
-                            className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 transition"
-                            title="ตัดจ่ายออก"
-                          >
-                            <Minus className="w-3.5 h-3.5" />
-                          </button>
+                          {canReceive && (
+                            <button
+                              onClick={() => onQuickMove(item, "in")}
+                              className="p-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 transition cursor-pointer"
+                              title="รับเข้าสต็อก"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          {canIssue && (
+                            <button
+                              onClick={() => onQuickMove(item, "out")}
+                              className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 transition cursor-pointer"
+                              title="ตัดจ่ายออก"
+                            >
+                              <Minus className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <button
                             onClick={() => onSelectItem(item)}
-                            className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition"
+                            className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
                             title="ดูรายละเอียด"
                           >
                             <Eye className="w-3.5 h-3.5" />

@@ -1,0 +1,74 @@
+[
+  {
+    "id": "emp_admin",
+    "name": "ผู้ดูแลระบบ (Admin)",
+    "username": "admin",
+    "password": "password",
+    "pin": "1234",
+    "role": "admin",
+    "department": "คลังสินค้าและสารสนเทศ",
+    "employeeCode": "ADMIN01",
+    "allowedLines": [],
+    "allowedSuppliers": [],
+    "perms": {
+      "view": true,
+      "receive": true,
+      "issue": true,
+      "addItem": true,
+      "importExport": true,
+      "reports": true,
+      "employees": true,
+      "backup": true
+    }
+  },
+  {
+    "id": "emp_lawan",
+    "name": "ลาวัลย์ ไยยธรรม (วัลย์)",
+    "username": "lawan",
+    "password": "password",
+    "pin": "5102",
+    "role": "manager",
+    "department": "แพ็ค / คลังวัตถุดิบ",
+    "employeeCode": "510220",
+    "allowedLines": [
+      "แพ็ค",
+      "คลังวัตถุดิบ",
+      "ทอผ้า"
+    ],
+    "allowedSuppliers": [],
+    "perms": {
+      "view": true,
+      "receive": true,
+      "issue": true,
+      "addItem": true,
+      "importExport": true,
+      "reports": true,
+      "employees": false,
+      "backup": false
+    }
+  },
+  {
+    "id": "emp_staff",
+    "name": "เจ้าหน้าที่คลังสินค้า (Staff)",
+    "username": "staff",
+    "password": "password",
+    "pin": "9999",
+    "role": "staff",
+    "department": "คลังสินค้าทั่วไป",
+    "employeeCode": "STF001",
+    "allowedLines": [
+      "แพ็ค"
+    ],
+    "allowedSuppliers": [],
+    "perms": {
+      "view": true,
+      "receive": true,
+      "issue": true,
+      "addItem": false,
+      "importExport": false,
+      "reports": false,
+      "employees": false,
+      "backup": false
+    }
+  }
+]

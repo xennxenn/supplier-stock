@@ -11,8 +11,11 @@ import {
   Lock,
   User,
   AlertCircle,
+  Layers,
+  Sparkles,
 } from "lucide-react";
 import type { Employee, PermissionKey } from "../types";
+import { PERMISSION_DEFINITIONS } from "../utils/permissionUtils";
 
 interface EmployeesViewProps {
   employees: Employee[];
@@ -21,17 +24,6 @@ interface EmployeesViewProps {
   availableSuppliers?: string[];
   onSaveEmployees: (emps: Employee[]) => void;
 }
-
-const ALL_PERMS: Array<{ key: PermissionKey; label: string }> = [
-  { key: "view", label: "ดูรายการสต็อก & แดชบอร์ด" },
-  { key: "receive", label: "บันทึกรับเข้าสินค้า" },
-  { key: "issue", label: "บันทึกเบิกจ่ายสินค้า" },
-  { key: "addItem", label: "เพิ่ม/แก้ไขรายการสินค้า" },
-  { key: "importExport", label: "นำเข้า / ส่งออก CSV" },
-  { key: "reports", label: "ดูรายงาน & สถิติ" },
-  { key: "employees", label: "จัดการพนักงาน & สิทธิ์" },
-  { key: "backup", label: "สำรองข้อมูล & ซิงค์ชีท" },
-];
 
 export const EmployeesView: React.FC<EmployeesViewProps> = ({
   employees,
@@ -43,6 +35,22 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
   const [editingEmp, setEditingEmp] = useState<Employee | null>(null);
   const [isCreating, setIsCreating] = useState(false);
 
+  const defaultPerms = {
+    view: true,
+    viewDashboard: true,
+    viewStock: true,
+    viewTransactions: true,
+    receive: true,
+    issue: true,
+    viewAlerts: true,
+    viewForecast: true,
+    reports: false,
+    addItem: false,
+    importExport: false,
+    employees: false,
+    backup: false,
+  };
+
   const [formData, setFormData] = useState<Partial<Employee>>({
     name: "",
     username: "",
@@ -53,16 +61,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     employeeCode: "",
     allowedLines: [],
     allowedSuppliers: [],
-    perms: {
-      view: true,
-      receive: true,
-      issue: true,
-      addItem: false,
-      importExport: false,
-      reports: false,
-      employees: false,
-      backup: false,
-    },
+    perms: defaultPerms,
   });
 
   const [empToDelete, setEmpToDelete] = useState<Employee | null>(null);
@@ -76,6 +75,18 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
       password: emp.password || emp.pin || "password",
       allowedLines: emp.allowedLines || [],
       allowedSuppliers: emp.allowedSuppliers || [],
+      perms: {
+        ...defaultPerms,
+        ...emp.perms,
+        view: emp.perms?.view !== false,
+        viewDashboard: emp.perms?.viewDashboard ?? emp.perms?.view ?? true,
+        viewStock: emp.perms?.viewStock ?? emp.perms?.view ?? true,
+        viewTransactions: emp.perms?.viewTransactions ?? true,
+        receive: Boolean(emp.perms?.receive),
+        issue: Boolean(emp.perms?.issue),
+        viewAlerts: emp.perms?.viewAlerts ?? emp.perms?.view ?? true,
+        viewForecast: emp.perms?.viewForecast ?? emp.perms?.view ?? true,
+      },
     });
     setIsCreating(false);
     setDeleteError("");
@@ -95,18 +106,97 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
       employeeCode: "",
       allowedLines: [],
       allowedSuppliers: [],
-      perms: {
-        view: true,
-        receive: true,
-        issue: true,
-        addItem: false,
-        importExport: false,
-        reports: false,
-        employees: false,
-        backup: false,
-      },
+      perms: defaultPerms,
     });
     setDeleteError("");
+  };
+
+  // Preset permission setters
+  const applyPreset = (preset: "admin" | "receiveOnly" | "issueOnly" | "readOnly" | "fullStaff") => {
+    if (preset === "admin") {
+      const allTrue: any = {};
+      PERMISSION_DEFINITIONS.forEach((p) => {
+        allTrue[p.key] = true;
+      });
+      allTrue.view = true;
+      setFormData({ ...formData, role: "admin", perms: allTrue });
+    } else if (preset === "receiveOnly") {
+      setFormData({
+        ...formData,
+        perms: {
+          view: true,
+          viewDashboard: true,
+          viewStock: true,
+          viewTransactions: true,
+          receive: true,
+          issue: false,
+          viewAlerts: true,
+          viewForecast: false,
+          reports: false,
+          addItem: false,
+          importExport: false,
+          employees: false,
+          backup: false,
+        },
+      });
+    } else if (preset === "issueOnly") {
+      setFormData({
+        ...formData,
+        perms: {
+          view: true,
+          viewDashboard: true,
+          viewStock: true,
+          viewTransactions: true,
+          receive: false,
+          issue: true,
+          viewAlerts: true,
+          viewForecast: false,
+          reports: false,
+          addItem: false,
+          importExport: false,
+          employees: false,
+          backup: false,
+        },
+      });
+    } else if (preset === "readOnly") {
+      setFormData({
+        ...formData,
+        perms: {
+          view: true,
+          viewDashboard: true,
+          viewStock: true,
+          viewTransactions: true,
+          receive: false,
+          issue: false,
+          viewAlerts: true,
+          viewForecast: true,
+          reports: true,
+          addItem: false,
+          importExport: false,
+          employees: false,
+          backup: false,
+        },
+      });
+    } else if (preset === "fullStaff") {
+      setFormData({
+        ...formData,
+        perms: {
+          view: true,
+          viewDashboard: true,
+          viewStock: true,
+          viewTransactions: true,
+          receive: true,
+          issue: true,
+          viewAlerts: true,
+          viewForecast: true,
+          reports: false,
+          addItem: true,
+          importExport: true,
+          employees: false,
+          backup: false,
+        },
+      });
+    }
   };
 
   const handleSave = (e: React.FormEvent) => {
@@ -118,6 +208,24 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
 
     const cleanUsername = (formData.username || formData.employeeCode || formData.name || "").trim().toLowerCase();
     const cleanPassword = (formData.password || formData.pin || "password").trim();
+
+    const finalPerms = {
+      ...defaultPerms,
+      ...formData.perms,
+      view: formData.perms?.view !== false,
+      viewDashboard: Boolean(formData.perms?.viewDashboard ?? formData.perms?.view),
+      viewStock: Boolean(formData.perms?.viewStock ?? formData.perms?.view),
+      viewTransactions: Boolean(formData.perms?.viewTransactions),
+      receive: Boolean(formData.perms?.receive),
+      issue: Boolean(formData.perms?.issue),
+      viewAlerts: Boolean(formData.perms?.viewAlerts),
+      viewForecast: Boolean(formData.perms?.viewForecast),
+      reports: Boolean(formData.perms?.reports),
+      addItem: Boolean(formData.perms?.addItem),
+      importExport: Boolean(formData.perms?.importExport),
+      employees: Boolean(formData.perms?.employees),
+      backup: Boolean(formData.perms?.backup),
+    };
 
     if (isCreating) {
       const newEmp: Employee = {
@@ -131,16 +239,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         employeeCode: (formData.employeeCode || "").trim(),
         allowedLines: formData.allowedLines || [],
         allowedSuppliers: formData.allowedSuppliers || [],
-        perms: formData.perms || {
-          view: true,
-          receive: true,
-          issue: true,
-          addItem: false,
-          importExport: false,
-          reports: false,
-          employees: false,
-          backup: false,
-        },
+        perms: finalPerms,
       };
       onSaveEmployees([...employees, newEmp]);
       setIsCreating(false);
@@ -156,6 +255,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               pin: cleanPassword.slice(0, 6) || emp.pin,
               allowedLines: formData.allowedLines || [],
               allowedSuppliers: formData.allowedSuppliers || [],
+              perms: finalPerms,
             } as Employee)
           : emp
       );
@@ -186,6 +286,13 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     setDeleteError("");
   };
 
+  const tabPerms = PERMISSION_DEFINITIONS.filter(
+    (p) => p.category === "เมนูหลัก (Navigation Tabs)"
+  );
+  const actionPerms = PERMISSION_DEFINITIONS.filter(
+    (p) => p.category === "สิทธิ์การดำเนินการ (Actions)"
+  );
+
   return (
     <div className="space-y-6 pb-12">
       {/* Header Banner */}
@@ -196,95 +303,84 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
             จัดการรายชื่อพนักงาน & สิทธิ์การเข้าใช้งาน
           </h2>
           <p className="text-xs text-slate-500 mt-1">
-            กำหนด Username, Password และสิทธิ์การใช้งานในแต่ละโมดูลของระบบ
+            กำหนด Username, Password, สิทธิ์การเข้าถึงไลน์การผลิต และสิทธิ์การใช้งานในแต่ละเมนู/การรับ-เบิกจ่าย
           </p>
         </div>
 
         <button
           onClick={handleNew}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm transition cursor-pointer"
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer"
         >
           <Plus className="w-4 h-4" />
           <span>เพิ่มพนักงานใหม่</span>
         </button>
       </div>
 
-      {/* Editor Modal */}
+      {/* Create / Edit Form Modal */}
       {(isCreating || editingEmp) && (
-        <div className="bg-white p-6 rounded-2xl border-2 border-amber-400 shadow-md">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
-            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Shield className="w-4 h-4 text-amber-600" />
-              {isCreating ? "เพิ่มพนักงานใหม่" : "แก้ไขข้อมูลพนักงาน & สิทธิ์"}
+        <div className="bg-white rounded-2xl border border-amber-200 shadow-lg p-6 animate-in fade-in duration-150">
+          <div className="flex items-center justify-between pb-4 mb-4 border-b border-slate-100">
+            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <Shield className="w-5 h-5 text-amber-500" />
+              {isCreating ? "เพิ่มรายชื่อพนักงานใหม่" : `แก้ไขข้อมูล: ${editingEmp?.name}`}
             </h3>
             <button
               onClick={() => {
                 setIsCreating(false);
                 setEditingEmp(null);
               }}
-              className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+              className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
             >
-              <X className="w-4 h-4" />
+              <X className="w-5 h-5" />
             </button>
           </div>
 
-          <form onSubmit={handleSave} className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+          <form onSubmit={handleSave} className="space-y-5 text-xs">
+            {/* Basic Info */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  ชื่อ-นามสกุล *
+                  ชื่อ - นามสกุล <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="text"
                   required
-                  value={formData.name}
-                  onChange={(e) =>
-                    setFormData({ ...formData, name: e.target.value })
-                  }
-                  placeholder="เช่น สมชาย ใจดี"
+                  value={formData.name || ""}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  placeholder="เช่น สมชาย ใจดี (ต้น)"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 text-slate-900"
                 />
               </div>
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  ชื่อผู้ใช้ (Username) *
+                  Username (สำหรับเข้าสู่ระบบ)
                 </label>
                 <input
                   type="text"
-                  required
                   value={formData.username || ""}
-                  onChange={(e) =>
-                    setFormData({ ...formData, username: e.target.value })
-                  }
-                  placeholder="เช่น somchai หรือ admin"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono focus:bg-white focus:ring-2 focus:ring-amber-500 text-slate-900"
+                  onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                  placeholder="เช่น somchai หรือ รหัสพนักงาน"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 font-mono text-slate-900"
                 />
               </div>
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  รหัสผ่าน (Password) *
+                  รหัสผ่าน (Password)
                 </label>
                 <input
                   type="text"
-                  required
                   value={formData.password || ""}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      password: e.target.value,
-                      pin: e.target.value,
-                    })
-                  }
-                  placeholder="เช่น pass1234"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono focus:bg-white focus:ring-2 focus:ring-amber-500 text-slate-900"
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  placeholder="เช่น password หรือ PIN"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 font-mono text-slate-900"
                 />
               </div>
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  รหัสพนักงาน
+                  รหัสพนักงาน (Employee Code)
                 </label>
                 <input
                   type="text"
@@ -292,8 +388,8 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                   onChange={(e) =>
                     setFormData({ ...formData, employeeCode: e.target.value })
                   }
-                  placeholder="เช่น 510220"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono focus:bg-white focus:ring-2 focus:ring-amber-500 text-slate-900"
+                  placeholder="เช่น 510220 หรือ STF001"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 font-mono text-slate-900"
                 />
               </div>
 
@@ -318,12 +414,14 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                 </label>
                 <select
                   value={formData.role}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const newRole = e.target.value as any;
                     setFormData({
                       ...formData,
-                      role: e.target.value as any,
-                    })
-                  }
+                      role: newRole,
+                      ...(newRole === "admin" ? { allowedLines: [], allowedSuppliers: [] } : {}),
+                    });
+                  }}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 text-slate-900"
                 >
                   <option value="admin">ผู้ดูแลระบบ (Admin - ทุกสิทธิ์)</option>
@@ -333,7 +431,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               </div>
             </div>
 
-            {/* Line & Supplier Access Control (Locking per user) */}
+            {/* Line & Supplier Access Control */}
             <div className="pt-3 border-t border-slate-100 space-y-4">
               {/* Allowed Lines */}
               <div>
@@ -373,7 +471,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                   <div className="text-[11px] text-slate-500">
                     {!formData.allowedLines || formData.allowedLines.length === 0
-                      ? "💡 ผู้ใช้นี้สามารถดูและจัดการข้อมูลของ ทุกไลน์การผลิต"
+                      ? "💡 ผู้ใช้นี้สามารถดูและจัดการข้อมูลของ ทุกไลน์การผลิต (ไม่จำกัด)"
                       : `🔒 จำกัดให้เข้าถึงเฉพาะ ${formData.allowedLines.length} ไลน์ที่เลือกด้านล่าง:`}
                   </div>
                   <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pt-1">
@@ -496,50 +594,159 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               </div>
             </div>
 
-            {/* Permissions Matrix */}
-            <div className="pt-3 border-t border-slate-100">
-              <label className="block font-bold text-slate-800 text-xs mb-2">
-                กำหนดสิทธิ์การใช้งานรายโมดูล:
-              </label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-                {ALL_PERMS.map((p) => {
-                  const isChecked =
-                    formData.role === "admin" ||
-                    formData.perms?.[p.key] === true;
+            {/* Granular Permissions Matrix */}
+            <div className="pt-3 border-t border-slate-100 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <label className="block font-bold text-slate-800 text-xs">
+                    🛡️ กำหนดสิทธิ์การใช้งานรายโมดูล & การดำเนินการ:
+                  </label>
+                  <p className="text-[11px] text-slate-500">
+                    เลือกเปิด-ปิดเมนู หรือเลือกเทมเพลตสิทธิ์สำเร็จรูปด้านขวา
+                  </p>
+                </div>
 
-                  return (
-                    <label
-                      key={p.key}
-                      className={`flex items-center gap-2 p-2.5 rounded-xl border transition cursor-pointer ${
-                        isChecked
-                          ? "bg-amber-50 border-amber-200 text-amber-900 font-semibold"
-                          : "bg-slate-50 border-slate-200 text-slate-600"
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        disabled={formData.role === "admin"}
-                        onChange={(e) => {
-                          const curPerms = formData.perms || ({} as any);
-                          setFormData({
-                            ...formData,
-                            perms: {
-                              ...curPerms,
-                              [p.key]: e.target.checked,
-                            },
-                          });
-                        }}
-                        className="rounded text-amber-600 focus:ring-amber-500"
-                      />
-                      <span>{p.label}</span>
-                    </label>
-                  );
-                })}
+                {/* Quick Presets */}
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-slate-400 font-semibold mr-1">เทมเพลต:</span>
+                  <button
+                    type="button"
+                    onClick={() => applyPreset("receiveOnly")}
+                    className="px-2 py-1 rounded-md text-[10px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 cursor-pointer"
+                  >
+                    รับเข้าอย่างเดียว
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyPreset("issueOnly")}
+                    className="px-2 py-1 rounded-md text-[10px] font-semibold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 cursor-pointer"
+                  >
+                    เบิกจ่ายอย่างเดียว
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyPreset("readOnly")}
+                    className="px-2 py-1 rounded-md text-[10px] font-semibold bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 cursor-pointer"
+                  >
+                    ดูข้อมูลอย่างเดียว
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyPreset("fullStaff")}
+                    className="px-2 py-1 rounded-md text-[10px] font-semibold bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200 cursor-pointer"
+                  >
+                    พนักงานทั่วไป
+                  </button>
+                </div>
+              </div>
+
+              {/* Section 1: Navigation Tabs */}
+              <div className="space-y-2">
+                <div className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-amber-500" />
+                  <span>1. สิทธิ์การเข้าถึงเมนู / หน้าจอ (Navigation Tabs)</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
+                  {tabPerms.map((p) => {
+                    const isChecked =
+                      formData.role === "admin" ||
+                      formData.perms?.[p.key] === true;
+
+                    return (
+                      <label
+                        key={p.key}
+                        className={`flex items-start gap-2.5 p-2.5 rounded-xl border transition cursor-pointer ${
+                          isChecked
+                            ? "bg-amber-50/70 border-amber-300 text-amber-950 font-semibold"
+                            : "bg-slate-50 border-slate-200 text-slate-600"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          disabled={formData.role === "admin"}
+                          onChange={(e) => {
+                            const curPerms = formData.perms || ({} as any);
+                            setFormData({
+                              ...formData,
+                              perms: {
+                                ...curPerms,
+                                [p.key]: e.target.checked,
+                              },
+                            });
+                          }}
+                          className="mt-0.5 rounded text-amber-600 focus:ring-amber-500"
+                        />
+                        <div className="min-w-0">
+                          <div className="text-xs">{p.label}</div>
+                          <div className="text-[10px] text-slate-400 font-normal leading-tight mt-0.5">
+                            {p.description}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Section 2: Actions Permissions */}
+              <div className="space-y-2 pt-2">
+                <div className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  <span>2. สิทธิ์การดำเนินการสำคัญ (Actions & Operations)</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
+                  {actionPerms.map((p) => {
+                    const isChecked =
+                      formData.role === "admin" ||
+                      formData.perms?.[p.key] === true;
+
+                    const isReceive = p.key === "receive";
+                    const isIssue = p.key === "issue";
+
+                    return (
+                      <label
+                        key={p.key}
+                        className={`flex items-start gap-2.5 p-2.5 rounded-xl border transition cursor-pointer ${
+                          isChecked
+                            ? isReceive
+                              ? "bg-emerald-50 border-emerald-300 text-emerald-950 font-bold"
+                              : isIssue
+                              ? "bg-rose-50 border-rose-300 text-rose-950 font-bold"
+                              : "bg-amber-50/70 border-amber-300 text-amber-950 font-semibold"
+                            : "bg-slate-50 border-slate-200 text-slate-600"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          disabled={formData.role === "admin"}
+                          onChange={(e) => {
+                            const curPerms = formData.perms || ({} as any);
+                            setFormData({
+                              ...formData,
+                              perms: {
+                                ...curPerms,
+                                [p.key]: e.target.checked,
+                              },
+                            });
+                          }}
+                          className="mt-0.5 rounded text-amber-600 focus:ring-amber-500"
+                        />
+                        <div className="min-w-0">
+                          <div className="text-xs">{p.label}</div>
+                          <div className="text-[10px] text-slate-400 font-normal leading-tight mt-0.5">
+                            {p.description}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 
-            <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+            <div className="flex justify-end gap-2 pt-4 border-t border-slate-100">
               <button
                 type="button"
                 onClick={() => {
@@ -552,9 +759,9 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer shadow-sm"
+                className="px-5 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer shadow-sm"
               >
-                บันทึกข้อมูล
+                บันทึกข้อมูลพนักงาน
               </button>
             </div>
           </form>
@@ -563,150 +770,156 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
 
       {/* Employees Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <table className="w-full text-left text-xs border-collapse">
-          <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-200">
-            <tr>
-              <th className="p-3">ชื่อ-นามสกุล</th>
-              <th className="p-3">Username</th>
-              <th className="p-3">รหัสพนักงาน</th>
-              <th className="p-3">บทบาท (Role)</th>
-              <th className="p-3">สิทธิ์ไลน์การผลิต</th>
-              <th className="p-3">สิทธิ์ Supplier</th>
-              <th className="p-3">สิทธิ์โมดูล</th>
-              <th className="p-3 text-right">จัดการ</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {employees.map((emp) => (
-              <tr key={emp.id} className="hover:bg-slate-50 transition">
-                <td className="p-3 font-bold text-slate-800 flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center font-bold">
-                    {emp.name[0] || "U"}
-                  </div>
-                  <div>
-                    <div>{emp.name}</div>
-                    <div className="text-[10px] text-slate-400 font-normal">
-                      {emp.department || "คลังสินค้า"}
-                    </div>
-                  </div>
-                </td>
-                <td className="p-3 font-mono font-semibold text-slate-800">
-                  {emp.username || emp.employeeCode || emp.id.replace("emp_", "")}
-                </td>
-                <td className="p-3 font-mono text-slate-600">
-                  {emp.employeeCode || "-"}
-                </td>
-                <td className="p-3">
-                  <span
-                    className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                      emp.role === "admin"
-                        ? "bg-purple-100 text-purple-800"
-                        : emp.role === "manager"
-                        ? "bg-blue-100 text-blue-800"
-                        : "bg-slate-100 text-slate-700"
-                    }`}
-                  >
-                    {emp.role === "admin"
-                      ? "Admin"
-                      : emp.role === "manager"
-                      ? "Manager"
-                      : "Staff"}
-                  </span>
-                </td>
-                <td className="p-3">
-                  {emp.role === "admin" || !emp.allowedLines || emp.allowedLines.length === 0 ? (
-                    <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-700 font-semibold border border-slate-200">
-                      ทุกไลน์
-                    </span>
-                  ) : (
-                    <div className="flex flex-wrap gap-1">
-                      <span className="px-2 py-0.5 rounded text-[10px] bg-amber-100 text-amber-900 font-bold border border-amber-200">
-                        {emp.allowedLines.length} ไลน์
-                      </span>
-                      {emp.allowedLines.slice(0, 2).map((l) => (
-                        <span key={l} className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 text-slate-600 border border-slate-200">
-                          {l}
-                        </span>
-                      ))}
-                      {emp.allowedLines.length > 2 && (
-                        <span className="text-[10px] text-slate-400 self-center">
-                          +{emp.allowedLines.length - 2}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </td>
-                <td className="p-3">
-                  {emp.role === "admin" || !emp.allowedSuppliers || emp.allowedSuppliers.length === 0 ? (
-                    <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-700 font-semibold border border-slate-200">
-                      ทุก Supplier
-                    </span>
-                  ) : (
-                    <div className="flex flex-wrap gap-1">
-                      <span className="px-2 py-0.5 rounded text-[10px] bg-indigo-100 text-indigo-900 font-bold border border-indigo-200">
-                        {emp.allowedSuppliers.length} Supplier
-                      </span>
-                      {emp.allowedSuppliers.slice(0, 2).map((s) => (
-                        <span key={s} className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 text-slate-600 border border-slate-200">
-                          {s}
-                        </span>
-                      ))}
-                      {emp.allowedSuppliers.length > 2 && (
-                        <span className="text-[10px] text-slate-400 self-center">
-                          +{emp.allowedSuppliers.length - 2}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </td>
-                <td className="p-3">
-                  <div className="flex flex-wrap gap-1">
-                    {emp.role === "admin" ? (
-                      <span className="px-2 py-0.5 rounded text-[10px] bg-purple-50 text-purple-700 font-bold border border-purple-200">
-                        ทุกสิทธิ์ (Full Access)
-                      </span>
-                    ) : (
-                      ALL_PERMS.filter((p) => emp.perms?.[p.key]).map((p) => (
-                        <span
-                          key={p.key}
-                          className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 text-slate-600 border border-slate-200"
-                        >
-                          {p.label.slice(0, 12)}
-                        </span>
-                      ))
-                    )}
-                  </div>
-                </td>
-                <td className="p-3 text-right">
-                  <div className="flex items-center justify-end gap-1">
-                    <button
-                      onClick={() => handleEdit(emp)}
-                      className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
-                      title="แก้ไข"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                    {emp.id !== currentUser.id && (
-                      <button
-                        onClick={() => {
-                          setDeleteError("");
-                          setEmpToDelete(emp);
-                        }}
-                        className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 transition cursor-pointer"
-                        title={`ลบ ${emp.name}`}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                  </div>
-                </td>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs border-collapse min-w-[700px]">
+            <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-200">
+              <tr>
+                <th className="p-3">ชื่อ-นามสกุล</th>
+                <th className="p-3">Username</th>
+                <th className="p-3">รหัสพนักงาน</th>
+                <th className="p-3">บทบาท</th>
+                <th className="p-3">สิทธิ์ไลน์การผลิต</th>
+                <th className="p-3">สิทธิ์รับ-จ่าย</th>
+                <th className="p-3">สิทธิ์เมนูหลัก</th>
+                <th className="p-3 text-right">จัดการ</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {employees.map((emp) => {
+                const canRec = emp.role === "admin" || emp.perms?.receive === true;
+                const canIss = emp.role === "admin" || emp.perms?.issue === true;
+
+                return (
+                  <tr key={emp.id} className="hover:bg-slate-50 transition">
+                    <td className="p-3 font-bold text-slate-800 flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center font-bold shrink-0">
+                        {emp.name[0] || "U"}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate">{emp.name}</div>
+                        <div className="text-[10px] text-slate-400 font-normal truncate">
+                          {emp.department || "คลังสินค้า"}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="p-3 font-mono font-semibold text-slate-800">
+                      {emp.username || emp.employeeCode || emp.id.replace("emp_", "")}
+                    </td>
+                    <td className="p-3 font-mono text-slate-600">
+                      {emp.employeeCode || "-"}
+                    </td>
+                    <td className="p-3">
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                          emp.role === "admin"
+                            ? "bg-purple-100 text-purple-800"
+                            : emp.role === "manager"
+                            ? "bg-blue-100 text-blue-800"
+                            : "bg-slate-100 text-slate-700"
+                        }`}
+                      >
+                        {emp.role === "admin"
+                          ? "Admin"
+                          : emp.role === "manager"
+                          ? "Manager"
+                          : "Staff"}
+                      </span>
+                    </td>
+                    <td className="p-3">
+                      {emp.role === "admin" || !emp.allowedLines || emp.allowedLines.length === 0 ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-700 font-semibold border border-slate-200">
+                          ทุกไลน์
+                        </span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          <span className="px-2 py-0.5 rounded text-[10px] bg-amber-100 text-amber-900 font-bold border border-amber-200">
+                            {emp.allowedLines.length} ไลน์
+                          </span>
+                          {emp.allowedLines.slice(0, 2).map((l) => (
+                            <span key={l} className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 text-slate-600 border border-slate-200">
+                              {l}
+                            </span>
+                          ))}
+                          {emp.allowedLines.length > 2 && (
+                            <span className="text-[10px] text-slate-400 self-center">
+                              +{emp.allowedLines.length - 2}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-3">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                            canRec
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : "bg-slate-50 text-slate-300 border-slate-200 line-through"
+                          }`}
+                        >
+                          + รับเข้า
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                            canIss
+                              ? "bg-rose-50 text-rose-700 border-rose-200"
+                              : "bg-slate-50 text-slate-300 border-slate-200 line-through"
+                          }`}
+                        >
+                          - เบิกจ่าย
+                        </span>
+                      </div>
+                    </td>
+                    <td className="p-3">
+                      <div className="flex flex-wrap gap-1">
+                        {emp.role === "admin" ? (
+                          <span className="px-2 py-0.5 rounded text-[10px] bg-purple-50 text-purple-700 font-bold border border-purple-200">
+                            ทุกเมนู (Full Access)
+                          </span>
+                        ) : (
+                          tabPerms.filter((p) => emp.perms?.[p.key] !== false && (emp.perms?.[p.key] === true || emp.perms?.view !== false)).slice(0, 3).map((p) => (
+                            <span
+                              key={p.key}
+                              className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 text-slate-600 border border-slate-200"
+                            >
+                              {p.label.split(" ")[0]}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </td>
+                    <td className="p-3 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => handleEdit(emp)}
+                          className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
+                          title="แก้ไข"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        {emp.id !== currentUser.id && (
+                          <button
+                            onClick={() => {
+                              setDeleteError("");
+                              setEmpToDelete(emp);
+                            }}
+                            className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 transition cursor-pointer"
+                            title={`ลบ ${emp.name}`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* Delete Confirmation Modal (In-UI, safe from iframe popups) */}
+      {/* Delete Confirmation Modal */}
       {empToDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/40 backdrop-blur-xs">
           <div className="bg-white max-w-md w-full rounded-2xl shadow-xl border border-slate-200 p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">

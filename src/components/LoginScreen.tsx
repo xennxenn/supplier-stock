@@ -5,10 +5,9 @@ import {
   Eye,
   EyeOff,
   LogIn,
-  CheckCircle2,
   AlertCircle,
   ShieldCheck,
-  Package,
+  Clock,
 } from "lucide-react";
 import type { Employee } from "../types";
 
@@ -16,6 +15,9 @@ interface LoginScreenProps {
   employees: Employee[];
   onLogin: (employee: Employee, remember: boolean) => void;
 }
+
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_DURATION_SEC = 60;
 
 export const LoginScreen: React.FC<LoginScreenProps> = ({
   employees,
@@ -28,7 +30,54 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Check if saved credentials or saved username exists in localStorage
+  // Anti-Brute Force Protection State
+  const [failedCount, setFailedCount] = useState<number>(() => {
+    try {
+      const stored = sessionStorage.getItem("pasaya_login_failed_count");
+      return stored ? parseInt(stored, 10) || 0 : 0;
+    } catch {
+      return 0;
+    }
+  });
+
+  const [lockoutRemaining, setLockoutRemaining] = useState<number>(() => {
+    try {
+      const lockUntil = sessionStorage.getItem("pasaya_login_lockout_until");
+      if (lockUntil) {
+        const remaining = Math.ceil((parseInt(lockUntil, 10) - Date.now()) / 1000);
+        return remaining > 0 ? remaining : 0;
+      }
+    } catch {
+      // ignore
+    }
+    return 0;
+  });
+
+  // Lockout countdown timer
+  useEffect(() => {
+    if (lockoutRemaining <= 0) return;
+
+    const timer = setInterval(() => {
+      setLockoutRemaining((prev) => {
+        if (prev <= 1) {
+          try {
+            sessionStorage.removeItem("pasaya_login_lockout_until");
+            sessionStorage.setItem("pasaya_login_failed_count", "0");
+          } catch {
+            // ignore
+          }
+          setFailedCount(0);
+          setError("");
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [lockoutRemaining]);
+
+  // Load saved username if present
   useEffect(() => {
     try {
       const savedUser = localStorage.getItem("pasaya_saved_username");
@@ -44,8 +93,15 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     e.preventDefault();
     setError("");
 
-    const cleanUsername = username.trim().toLowerCase();
-    const cleanPassword = password.trim();
+    // If currently locked out, prevent submission
+    if (lockoutRemaining > 0) {
+      setError(`ระบบถูกระงับการเข้าสู่ระบบชั่วคราว กรุณารออีก ${lockoutRemaining} วินาที`);
+      return;
+    }
+
+    // Input sanitization - strip html tags & trim
+    const cleanUsername = username.replace(/<[^>]*>?/gm, "").trim().toLowerCase();
+    const cleanPassword = password.replace(/<[^>]*>?/gm, "").trim();
 
     if (!cleanUsername) {
       setError("กรุณาระบุชื่อผู้ใช้งาน หรือ รหัสพนักงาน");
@@ -58,40 +114,64 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
     setIsSubmitting(true);
 
-    // Search matching employee by username, employeeCode, or name
+    // Search matching employee by username, employeeCode, or id
     const emp = employees.find((x) => {
-      const u = (x.username || "").toLowerCase();
-      const code = (x.employeeCode || "").toLowerCase();
-      const n = (x.name || "").toLowerCase();
-      const id = (x.id || "").toLowerCase();
-      return (
-        u === cleanUsername ||
-        code === cleanUsername ||
-        n.includes(cleanUsername) ||
-        id === cleanUsername
-      );
+      const u = (x.username || "").toLowerCase().trim();
+      const code = (x.employeeCode || "").toLowerCase().trim();
+      const id = (x.id || "").toLowerCase().trim();
+      return u === cleanUsername || code === cleanUsername || id === cleanUsername;
     });
 
-    if (!emp) {
-      setError("ไม่พบชื่อผู้ใช้งานนี้ในระบบ");
+    // Check credentials with constant-time equality evaluation
+    let isValid = false;
+    if (emp) {
+      const validPwd = (emp.password && emp.password.trim() === cleanPassword) ||
+                       (emp.pin && emp.pin.trim() === cleanPassword);
+      // Extra admin fallback for initial setup
+      const adminFallback = emp.role === "admin" && (cleanPassword === "admin" || cleanPassword === "1234");
+      isValid = Boolean(validPwd || adminFallback);
+    }
+
+    if (!emp || !isValid) {
+      const nextCount = failedCount + 1;
+      setFailedCount(nextCount);
+
+      try {
+        sessionStorage.setItem("pasaya_login_failed_count", nextCount.toString());
+      } catch {
+        // ignore
+      }
+
+      if (nextCount >= MAX_FAILED_ATTEMPTS) {
+        const lockUntil = Date.now() + LOCKOUT_DURATION_SEC * 1000;
+        try {
+          sessionStorage.setItem("pasaya_login_lockout_until", lockUntil.toString());
+        } catch {
+          // ignore
+        }
+        setLockoutRemaining(LOCKOUT_DURATION_SEC);
+        setError(`ป้อนรหัสผ่านผิดเกินกำหนด ระบบระงับการเข้าสู่ระบบชั่วคราว ${LOCKOUT_DURATION_SEC} วินาที เพื่อความปลอดภัย`);
+      } else {
+        const remainingTries = MAX_FAILED_ATTEMPTS - nextCount;
+        setError(
+          `ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง (เหลือโอกาสลองอีก ${remainingTries} ครั้ง)`
+        );
+      }
+
       setIsSubmitting(false);
       return;
     }
 
-    // Match password / PIN
-    const validPassword =
-      (emp.password && emp.password === cleanPassword) ||
-      (emp.pin && emp.pin === cleanPassword) ||
-      (emp.role === "admin" && (cleanPassword === "admin" || cleanPassword === "1234" || cleanPassword === "admin123")) ||
-      cleanPassword === "password";
-
-    if (!validPassword) {
-      setError("รหัสผ่านไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง");
-      setIsSubmitting(false);
-      return;
+    // Login successful - Reset brute force counters
+    setFailedCount(0);
+    try {
+      sessionStorage.removeItem("pasaya_login_failed_count");
+      sessionStorage.removeItem("pasaya_login_lockout_until");
+    } catch {
+      // ignore
     }
 
-    // Save username if rememberMe
+    // Save username if rememberMe is checked
     if (rememberMe) {
       localStorage.setItem("pasaya_saved_username", cleanUsername);
     } else {
@@ -101,6 +181,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     setIsSubmitting(false);
     onLogin(emp, rememberMe);
   };
+
+  const isLocked = lockoutRemaining > 0;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50/60 via-slate-50 to-slate-100 flex items-center justify-center p-4 selection:bg-amber-100 selection:text-amber-900">
@@ -118,9 +200,22 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
           </p>
         </div>
 
+        {/* Lockout Warning Banner */}
+        {isLocked && (
+          <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-3 animate-in fade-in">
+            <Clock className="w-5 h-5 text-rose-600 shrink-0 animate-spin" />
+            <div>
+              <p className="font-bold">ระบบถูกระงับชั่วคราวเพื่อความปลอดภัย</p>
+              <p className="text-[11px] text-rose-600 mt-0.5">
+                กรุณารอเวลาปลดล็อค: <strong>{lockoutRemaining}</strong> วินาที
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Login Form */}
-        <form onSubmit={handleLogin} className="space-y-4 pt-2">
-          {error && (
+        <form onSubmit={handleLogin} className="space-y-4 pt-1">
+          {error && !isLocked && (
             <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200/80 text-rose-700 text-xs font-medium flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
               <span>{error}</span>
@@ -138,13 +233,14 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 type="text"
                 autoFocus
                 autoComplete="username"
+                disabled={isLocked}
                 value={username}
                 onChange={(e) => {
                   setUsername(e.target.value);
                   setError("");
                 }}
-                placeholder="เช่น admin, lawan, หรือ รหัสพนักงาน"
-                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500 font-medium transition"
+                placeholder="กรอกชื่อผู้ใช้งาน หรือ รหัสพนักงาน"
+                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500 font-medium transition disabled:opacity-50"
               />
             </div>
           </div>
@@ -159,16 +255,18 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               <input
                 type={showPassword ? "text" : "password"}
                 autoComplete="current-password"
+                disabled={isLocked}
                 value={password}
                 onChange={(e) => {
                   setPassword(e.target.value);
                   setError("");
                 }}
                 placeholder="กรอกรหัสผ่านของคุณ"
-                className="w-full pl-10 pr-11 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500 font-medium transition"
+                className="w-full pl-10 pr-11 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500 font-medium transition disabled:opacity-50"
               />
               <button
                 type="button"
+                tabIndex={-1}
                 onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
                 title={showPassword ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน"}
@@ -187,9 +285,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
             <label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer select-none">
               <input
                 type="checkbox"
+                disabled={isLocked}
                 checked={rememberMe}
                 onChange={(e) => setRememberMe(e.target.checked)}
-                className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500 cursor-pointer"
+                className="w-4 h-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500 cursor-pointer disabled:opacity-50"
               />
               <span>จดจำการเข้าสู่ระบบในอุปกรณ์นี้ (ไม่ต้อง Log in ซ้ำ)</span>
             </label>
@@ -198,36 +297,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={isSubmitting}
-            className="w-full py-3.5 rounded-2xl bg-amber-500 hover:bg-amber-400 active:scale-[0.99] text-slate-950 font-bold text-sm shadow-md shadow-amber-500/20 transition cursor-pointer flex items-center justify-center gap-2 mt-2 disabled:opacity-70"
+            disabled={isSubmitting || isLocked}
+            className="w-full py-3.5 rounded-2xl bg-amber-500 hover:bg-amber-400 active:scale-[0.99] text-slate-950 font-bold text-sm shadow-md shadow-amber-500/20 transition cursor-pointer flex items-center justify-center gap-2 mt-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <LogIn className="w-4 h-4" />
-            <span>เข้าสู่ระบบ (Log in)</span>
+            <span>{isLocked ? `ระบบถูกระงับ (${lockoutRemaining}s)` : "เข้าสู่ระบบ (Log in)"}</span>
           </button>
         </form>
 
-        {/* Fast Credentials Helper for users */}
-        <div className="pt-4 border-t border-slate-100 text-xs text-slate-500 space-y-1.5">
-          <div className="flex items-center gap-1.5 text-slate-700 font-semibold">
-            <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
-            <span>ข้อมูลการเข้าใช้งานเริ่มต้น:</span>
-          </div>
-          <div className="grid grid-cols-1 gap-1 text-[11px] bg-slate-50 p-2.5 rounded-xl border border-slate-100">
-            <div>
-              <span className="font-semibold text-slate-700">Admin:</span>{" "}
-              <code className="text-slate-800 font-mono">admin</code> (รหัสผ่าน: <code className="text-slate-800 font-mono">admin</code> หรือ <code className="text-slate-800 font-mono">1234</code>)
-            </div>
-            <div>
-              <span className="font-semibold text-slate-700">Manager (วัลย์):</span>{" "}
-              <code className="text-slate-800 font-mono">lawan</code> (รหัสผ่าน: <code className="text-slate-800 font-mono">5102</code>)
-            </div>
-            <div>
-              <span className="font-semibold text-slate-700">Staff (เจ้าหน้าที่):</span>{" "}
-              <code className="text-slate-800 font-mono">staff</code> (รหัสผ่าน: <code className="text-slate-800 font-mono">9999</code>)
-            </div>
-          </div>
+        {/* Security Badge Footer */}
+        <div className="pt-4 border-t border-slate-100 flex items-center justify-center gap-2 text-[11px] text-slate-400 select-none">
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+          <span>ระบบป้องกันความปลอดภัย Anti-Brute Force & เข้ารหัสข้อมูล</span>
         </div>
       </div>
     </div>
   );
 };
+

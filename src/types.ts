@@ -109,15 +109,35 @@ export interface ForecastItem {
 
 export type PermissionKey =
   | "view"
+  | "viewDashboard"
+  | "viewStock"
+  | "viewTransactions"
   | "receive"
   | "issue"
+  | "viewAlerts"
+  | "viewForecast"
+  | "reports"
   | "addItem"
   | "importExport"
-  | "reports"
   | "employees"
   | "backup";
 
-export type EmployeePermissions = Record<PermissionKey, boolean>;
+export type EmployeePermissions = {
+  view?: boolean;
+  viewDashboard?: boolean;
+  viewStock?: boolean;
+  viewTransactions?: boolean;
+  receive?: boolean;
+  issue?: boolean;
+  viewAlerts?: boolean;
+  viewForecast?: boolean;
+  reports?: boolean;
+  addItem?: boolean;
+  importExport?: boolean;
+  employees?: boolean;
+  backup?: boolean;
+  [key: string]: boolean | undefined;
+};
 
 export interface Employee {
   id: string;

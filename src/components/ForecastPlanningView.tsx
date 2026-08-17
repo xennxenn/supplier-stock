@@ -30,14 +30,16 @@ import {
   Tooltip,
   Legend,
 } from "recharts";
-import type { StockItem, Transaction, ForecastItem } from "../types";
+import type { StockItem, Transaction, ForecastItem, Employee } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
+import { hasPermission } from "../utils/permissionUtils";
 
 interface ForecastPlanningViewProps {
   items: StockItem[];
   transactions: Transaction[];
   lines: string[];
   categories: string[];
+  currentUser?: Employee;
   onSelectItem: (item: StockItem) => void;
   onQuickMove: (item: StockItem, type: "in" | "out") => void;
 }
@@ -59,9 +61,12 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   transactions,
   lines,
   categories,
+  currentUser,
   onSelectItem,
   onQuickMove,
 }) => {
+  const canReceive = hasPermission(currentUser, "receive");
+  const canExport = hasPermission(currentUser, "importExport");
   // Forecast horizon in months (3, 6, 9, 12)
   const [forecastHorizon, setForecastHorizon] = useState<3 | 6 | 9 | 12>(6);
   const [bufferPercent, setBufferPercent] = useState<number>(10); // +10% default growth/safety buffer

@@ -15,7 +15,8 @@ import {
   ExternalLink,
   TrendingUp,
 } from "lucide-react";
-import type { Employee, PermissionKey, NavTab } from "../types";
+import type { Employee, NavTab } from "../types";
+import { canAccessTab } from "../utils/permissionUtils";
 
 interface NavbarProps {
   activeTab: NavTab;
@@ -45,56 +46,48 @@ export const Navbar: React.FC<NavbarProps> = ({
     id: NavTab;
     label: string;
     icon: React.ComponentType<{ className?: string }>;
-    perm?: PermissionKey;
     badge?: number;
     highlight?: boolean;
   }> = [
-    { id: "dashboard", label: "แดชบอร์ด", icon: LayoutDashboard, perm: "view" },
+    { id: "dashboard", label: "แดชบอร์ด", icon: LayoutDashboard },
     {
       id: "stock",
       label: "รายการสต็อก (Stock)",
       icon: Package,
-      perm: "view",
       badge: totalStock > 0 ? totalStock : undefined,
     },
     {
       id: "transactions",
       label: "รายการเบิกจ่าย",
       icon: FileSpreadsheet,
-      perm: "view",
     },
     {
       id: "movement",
       label: "บันทึกรับ-จ่าย",
       icon: ArrowDownUp,
-      perm: "receive",
     },
     {
       id: "alerts",
       label: "เตือนสั่งซื้อ",
       icon: AlertTriangle,
-      perm: "view",
       badge: lowStockCount > 0 ? lowStockCount : undefined,
     },
     {
       id: "forecast",
       label: "พยากรณ์สั่งซื้อ (Forecast)",
       icon: TrendingUp,
-      perm: "view",
       highlight: true,
     },
-    { id: "reports", label: "รายงาน & สถิติ", icon: BarChart3, perm: "reports" },
+    { id: "reports", label: "รายงาน & สถิติ", icon: BarChart3 },
     {
       id: "employees",
       label: "พนักงาน & สิทธิ์",
       icon: Users,
-      perm: "employees",
     },
     {
       id: "backup",
       label: "ชีท & สำรองข้อมูล",
       icon: Database,
-      perm: "backup",
     },
   ];
 
@@ -201,10 +194,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Tab navigation */}
         <nav className="flex space-x-1.5 overflow-x-auto py-2.5 scrollbar-none">
           {navItems.map((item) => {
-            const hasPerm =
-              !item.perm ||
-              currentUser.role === "admin" ||
-              currentUser.perms[item.perm];
+            const hasPerm = canAccessTab(currentUser, item.id);
             const isActive = activeTab === item.id;
             const Icon = item.icon;
 
