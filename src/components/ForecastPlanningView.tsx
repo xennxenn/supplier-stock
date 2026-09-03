@@ -30,7 +30,8 @@ import {
   Tooltip,
   Legend,
 } from "recharts";
-import type { StockItem, Transaction, ForecastItem, Employee } from "../types";
+import type { StockItem, Transaction, ForecastItem, Employee, OrderStatus } from "../types";
+import { useEffect } from "react";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
 
@@ -77,6 +78,25 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   const [selectedRisk, setSelectedRisk] = useState<"all" | "critical" | "warning" | "ok" | "overstock">("all");
   const [sortField, setSortField] = useState<ForecastSortField>("estimatedCost");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  const [orderStatuses, setOrderStatuses] = useState<OrderStatus[]>([]);
+
+  const fetchOrderStatuses = async () => {
+    try {
+      const res = await fetch("/api/order-status");
+      const data = await res.json();
+      if (data.success && data.statuses) {
+        setOrderStatuses(data.statuses);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    fetchOrderStatuses();
+  }, []);
+
 
   // Calculate historical monthly burn rate per SKU from transactions
   // Determine date span of transactions
@@ -833,13 +853,26 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                         {f.projectedDemand.toLocaleString()} {it.unit}
                       </td>
                       <td className="p-3 text-right">
-                        {f.recommendedOrder > 0 ? (
-                          <span className="font-bold text-amber-700 font-mono text-sm bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                            +{f.recommendedOrder.toLocaleString()} {it.unit}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400 text-[11px]">เพียงพอ</span>
-                        )}
+                        <div className="flex flex-col items-end gap-1">
+                          {f.recommendedOrder > 0 ? (
+                            <span className="font-bold text-amber-700 font-mono text-sm bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                              +{f.recommendedOrder.toLocaleString()} {it.unit}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 text-[11px]">เพียงพอ</span>
+                          )}
+                          {(() => {
+                            const oStatus = orderStatuses.find(s => s.barcode === it.barcode);
+                            if (oStatus?.isOrdered) {
+                              return (
+                                <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-200">
+                                  สั่งซื้อรอจัดส่ง (Lot: {oStatus.lotNumber || "-"})
+                                </span>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </div>
                       </td>
                       <td className="p-3 text-right font-mono font-bold text-emerald-700">
                         {f.estimatedCost > 0

@@ -125,6 +125,9 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
       if (selectedMonth !== "all" && t.month !== Number(selectedMonth)) return false;
       if (selectedYear !== "all" && t.year !== Number(selectedYear)) return false;
 
+      // Filter out rows with no date
+      if (!t.date || t.date.trim() === "") return false;
+
       return true;
     });
   }, [

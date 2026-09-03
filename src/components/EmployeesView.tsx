@@ -206,7 +206,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
       return;
     }
 
-    const cleanUsername = (formData.username || formData.employeeCode || formData.name || "").trim().toLowerCase();
+    const cleanUsername = (formData.username || formData.employeeCode || formData.name || "").trim();
     const cleanPassword = (formData.password || formData.pin || "password").trim();
 
     const finalPerms = {

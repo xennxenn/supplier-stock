@@ -117,7 +117,16 @@ export default function App() {
             : []
         );
         setLastSyncedAt(data.syncedAt);
-        localStorage.setItem("pasaya_stock_cache", JSON.stringify(data));
+        try {
+          // Cache only a subset to prevent localStorage QuotaExceededError
+          const cacheData = { 
+            ...data, 
+            recentTransactions: data.recentTransactions?.slice(0, 1500) || [] 
+          };
+          localStorage.setItem("pasaya_stock_cache", JSON.stringify(cacheData));
+        } catch (storageErr) {
+          console.warn("Could not save to localStorage (quota exceeded)", storageErr);
+        }
         if (!silent) {
           showToast(
             `ซิงค์ข้อมูล Google Sheets สำเร็จ! โหลด ${data.totalStockItems.toLocaleString()} รายการสต็อก และ ${data.totalTransactions.toLocaleString()} ประวัติเบิกจ่าย`
@@ -548,6 +557,7 @@ export default function App() {
         {activeTab === "alerts" && (
           <LowStockAlertsView
             items={scopedItems}
+            transactions={scopedTransactions}
             lines={uniqueLines}
             currentUser={currentUser}
             onSelectItem={(item) => setSelectedDetailItem(item)}

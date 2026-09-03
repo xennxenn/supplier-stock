@@ -109,6 +109,7 @@ if (!fs.existsSync(DATA_DIR)) {
 const EMPLOYEES_FILE = path.join(DATA_DIR, "employees.json");
 const TX_FILE = path.join(DATA_DIR, "custom_transactions.json");
 const BACKUPS_FILE = path.join(DATA_DIR, "backups.json");
+const ORDER_STATUS_FILE = path.join(DATA_DIR, "order_status.json");
 
 const DEFAULT_EMPLOYEES: Employee[] = [
   {
@@ -331,6 +332,71 @@ function saveStoredBackups(backups: BackupEntry[]) {
     console.error("Failed to save backups.json:", err);
   }
 }
+
+
+export interface OrderStatus {
+  barcode: string;
+  isOrdered: boolean;
+  lotNumber: string;
+  updatedAt: string;
+}
+
+function getStoredOrderStatus(): OrderStatus[] {
+  try {
+    if (fs.existsSync(ORDER_STATUS_FILE)) {
+      const data = fs.readFileSync(ORDER_STATUS_FILE, "utf-8");
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.warn("Could not read order_status.json:", err);
+  }
+  return [];
+}
+
+app.get("/api/order-status", (req, res) => {
+  res.json({ success: true, statuses: getStoredOrderStatus() });
+});
+
+app.post("/api/order-status", rateLimiter(40), (req, res) => {
+  try {
+    const { barcode, isOrdered, lotNumber } = req.body;
+    if (!barcode) return res.status(400).json({ success: false, error: "Missing barcode" });
+    const statuses = getStoredOrderStatus();
+    const idx = statuses.findIndex((s) => s.barcode === barcode);
+    if (idx >= 0) {
+      statuses[idx] = { barcode, isOrdered: !!isOrdered, lotNumber: String(lotNumber || ""), updatedAt: new Date().toISOString() };
+    } else {
+      statuses.push({ barcode, isOrdered: !!isOrdered, lotNumber: String(lotNumber || ""), updatedAt: new Date().toISOString() });
+    }
+    fs.writeFileSync(ORDER_STATUS_FILE, JSON.stringify(statuses, null, 2), "utf-8");
+    res.json({ success: true, statuses });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
+app.post("/api/order-status-batch", rateLimiter(40), (req, res) => {
+  try {
+    const { lotNumber, isOrdered } = req.body;
+    if (!lotNumber) return res.status(400).json({ success: false, error: "Missing lotNumber" });
+    const statuses = getStoredOrderStatus();
+    
+    // Update all matching lotNumbers
+    statuses.forEach(s => {
+      if (s.lotNumber === lotNumber) {
+        s.isOrdered = !!isOrdered;
+        s.updatedAt = new Date().toISOString();
+      }
+    });
+
+    fs.writeFileSync(ORDER_STATUS_FILE, JSON.stringify(statuses, null, 2), "utf-8");
+    res.json({ success: true, statuses });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
 
 // In-memory cache
 let cachedData: SheetsSyncData | null = null;
@@ -606,8 +672,7 @@ async function fetchAndParseSheets(force = false): Promise<SheetsSyncData> {
     })
   );
 
-  // Take first 1,500 transactions for high performance initial client payload
-  const recentTransactions = transactions.slice(0, 1500);
+  const recentTransactions = transactions;
 
   const syncResult: SheetsSyncData = {
     success: true,
@@ -814,7 +879,7 @@ app.post("/api/transactions", rateLimiter(80), (req, res) => {
           targetItem.status = "ok";
         }
       }
-      cachedData.recentTransactions = allTransactionsCache.slice(0, 1500);
+      cachedData.recentTransactions = allTransactionsCache;
       cachedData.totalTransactions = allTransactionsCache.length;
     }
 

@@ -77,8 +77,22 @@ export function exportToCSV(
   URL.revokeObjectURL(url);
 }
 
+const THAI_MONTHS = [
+  "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+  "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."
+];
+
+function getMonthFromPart(part: string): number {
+  const parsed = parseInt(part, 10);
+  if (!isNaN(parsed)) return parsed - 1; // 0-indexed month
+  // Attempt to parse Thai month abbreviation
+  const idx = THAI_MONTHS.findIndex((m) => part.includes(m));
+  if (idx !== -1) return idx;
+  return NaN;
+}
+
 /**
- * Robust date parser supporting Thai Buddhist calendar, ISO, DD/MM/YYYY, and Excel serial numbers
+ * Robust date parser supporting Thai Buddhist calendar, ISO, DD/MM/YYYY, Thai month names, and Excel serial numbers
  */
 export function parseFlexibleDate(dateStr?: string, fallbackYear?: number, fallbackMonth?: number): number {
   if (!dateStr || dateStr.trim() === "") {
@@ -106,12 +120,13 @@ export function parseFlexibleDate(dateStr?: string, fallbackYear?: number, fallb
     const parts = datePart.split("/");
     if (parts.length === 3) {
       const d = parseInt(parts[0], 10);
-      const m = parseInt(parts[1], 10) - 1;
+      const m = getMonthFromPart(parts[1]);
       let y = parseInt(parts[2], 10);
 
       // Handle 2-digit years
       if (y < 100) {
-        y += y > 50 ? 1900 : 2000;
+        // If year is 50-99, it's likely Thai year 2550-2599
+        y += y >= 50 ? 2500 : 2000;
       }
       // Handle Thai Buddhist year (e.g., 2567 -> 2024)
       if (y > 2500) {
@@ -135,7 +150,7 @@ export function parseFlexibleDate(dateStr?: string, fallbackYear?: number, fallb
     }
   }
 
-  // YYYY-MM-DD or DD-MM-YYYY
+  // YYYY-MM-DD or DD-MM-YYYY or DD-MMM-YYYY (e.g. 2-ก.ย.-2026)
   if (str.includes("-")) {
     const parts = str.split("-");
     if (parts.length === 3) {
@@ -143,16 +158,21 @@ export function parseFlexibleDate(dateStr?: string, fallbackYear?: number, fallb
         // YYYY-MM-DD
         let y = parseInt(parts[0], 10);
         if (y > 2500) y -= 543;
-        const m = parseInt(parts[1], 10) - 1;
+        const m = getMonthFromPart(parts[1]);
         const d = parseInt(parts[2], 10);
         const dateObj = new Date(y, m, d);
         if (!isNaN(dateObj.getTime())) return dateObj.getTime();
       } else {
-        // DD-MM-YYYY
+        // DD-MM-YYYY or DD-MMM-YYYY
         const d = parseInt(parts[0], 10);
-        const m = parseInt(parts[1], 10) - 1;
+        const m = getMonthFromPart(parts[1]);
         let y = parseInt(parts[2], 10);
+        
+        if (y < 100) {
+          y += y >= 50 ? 2500 : 2000;
+        }
         if (y > 2500) y -= 543;
+        
         const dateObj = new Date(y, m, d);
         if (!isNaN(dateObj.getTime())) return dateObj.getTime();
       }

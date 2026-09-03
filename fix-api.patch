@@ -1,0 +1,21 @@
+--- src/api.ts
++++ src/api.ts
+@@ -115,8 +115,16 @@
+       const unitPrice = parseNum(r[9]);
+       const totalCost = parseNum(r[10]);
+-      const month = parseNum(r[11]);
+-      const year = parseNum(r[12]);
++      let month = parseNum(r[11]);
++      let year = parseNum(r[12]);
++      if (!month || !year) {
++        import("./utils/exportUtils").then(m => {
++          const parsedTime = m.parseFlexibleDate(date);
++          if (parsedTime > 0) {
++            const d = new Date(parsedTime);
++            if (!month) month = d.getMonth() + 1;
++            if (!year) year = d.getFullYear();
++          }
++        });
++      }
+       const balance = parseNum(r[13]);
+       const minStock = parseNum(r[14]);

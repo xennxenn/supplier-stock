@@ -171,3 +171,10 @@ export interface Settings {
   autoSyncIntervalMinutes: number;
   lastSyncTime?: string;
 }
+
+export interface OrderStatus {
+  barcode: string;
+  isOrdered: boolean;
+  lotNumber: string;
+  updatedAt: string;
+}

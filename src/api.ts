@@ -1,5 +1,6 @@
 import type { SheetsSyncData, Transaction, Employee, BackupEntry } from "./types";
 import Papa from "papaparse";
+import { parseFlexibleDate } from "./utils/exportUtils";
 
 const STOCK_SHEET_URL =
   "https://docs.google.com/spreadsheets/d/e/2PACX-1vS9Fm4Y7_BJZcpoolwOFQD6u0Exz4DdbKuFeV5oSjEsL9Pe_P560uyN0bSw522woUtA-JCbsCHJQ5eU/pub?gid=380033643&single=true&output=csv";
@@ -113,8 +114,18 @@ export async function fetchSheetsDataDirect(): Promise<SheetsSyncData> {
       const line = (r[8] || "").trim();
       const unitPrice = parseNum(r[9]);
       const totalCost = parseNum(r[10]);
-      const month = parseNum(r[11]);
-      const year = parseNum(r[12]);
+      let month = parseNum(r[11]);
+      let year = parseNum(r[12]);
+
+      if (!month || !year) {
+        const parsedTime = parseFlexibleDate(date);
+        if (parsedTime > 0) {
+          const d = new Date(parsedTime);
+          if (!month) month = d.getMonth() + 1;
+          if (!year) year = d.getFullYear();
+        }
+      }
+
       const balance = parseNum(r[13]);
       const minStock = parseNum(r[14]);
       const status = (r[15] || "").trim();
@@ -169,7 +180,7 @@ export async function fetchSheetsDataDirect(): Promise<SheetsSyncData> {
     totalStockItems: stockItems.length,
     totalTransactions: transactions.length,
     stockItems,
-    recentTransactions: transactions.slice(0, 1500),
+    recentTransactions: transactions,
     stats: {
       totalValue: Math.round(totalValue),
       totalSkus: stockItems.length,
