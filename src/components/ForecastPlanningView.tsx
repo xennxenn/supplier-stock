@@ -76,10 +76,13 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [selectedSupplier, setSelectedSupplier] = useState("all");
   const [selectedRisk, setSelectedRisk] = useState<"all" | "critical" | "warning" | "ok" | "overstock">("all");
+  const [filterOrderStatus, setFilterOrderStatus] = useState<"all" | "ordered" | "not_ordered">("all");
   const [sortField, setSortField] = useState<ForecastSortField>("estimatedCost");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
   const [orderStatuses, setOrderStatuses] = useState<OrderStatus[]>([]);
+
+  
 
   const fetchOrderStatuses = async () => {
     try {
@@ -199,10 +202,15 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
       if (selectedCategory !== "all" && f.item.category !== selectedCategory) return false;
       if (selectedSupplier !== "all" && f.item.supplier !== selectedSupplier) return false;
       if (selectedRisk !== "all" && f.riskLevel !== selectedRisk) return false;
+      
+      const oStatus = orderStatuses.find(s => s.barcode === f.item.barcode);
+      const isOrdered = oStatus?.isOrdered || false;
+      if (filterOrderStatus === "ordered" && !isOrdered) return false;
+      if (filterOrderStatus === "not_ordered" && isOrdered) return false;
 
       return true;
     });
-  }, [forecastItems, search, selectedLine, selectedCategory, selectedSupplier, selectedRisk]);
+  }, [forecastItems, search, selectedLine, selectedCategory, selectedSupplier, selectedRisk, filterOrderStatus, orderStatuses]);
 
   // Sort items
   const sortedItems = useMemo(() => {
@@ -523,7 +531,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
       {/* Filter and Control Bar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           {/* Search */}
           <div className="relative">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -565,6 +573,19 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                   {c}
                 </option>
               ))}
+            </select>
+          </div>
+
+          {/* Order Status */}
+          <div>
+            <select
+              value={filterOrderStatus}
+              onChange={(e) => setFilterOrderStatus(e.target.value as any)}
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
+            >
+              <option value="all">หมายเหตุ: แสดงทั้งหมด</option>
+              <option value="ordered">สั่งซื้อแล้วรอจัดส่ง</option>
+              <option value="not_ordered">ยังไม่ได้สั่งซื้อ</option>
             </select>
           </div>
 
@@ -794,6 +815,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                     {renderSortIcon("risk")}
                   </div>
                 </th>
+                <th className="p-3 text-center text-slate-700 w-40">หมายเหตุสั่งซื้อ</th>
                 <th className="p-3 text-center w-20 text-slate-700">จัดการ</th>
               </tr>
             </thead>
@@ -853,51 +875,54 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                         {f.projectedDemand.toLocaleString()} {it.unit}
                       </td>
                       <td className="p-3 text-right">
-                        <div className="flex flex-col items-end gap-1">
-                          {f.recommendedOrder > 0 ? (
-                            <span className="font-bold text-amber-700 font-mono text-sm bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                              +{f.recommendedOrder.toLocaleString()} {it.unit}
-                            </span>
-                          ) : (
-                            <span className="text-slate-400 text-[11px]">เพียงพอ</span>
-                          )}
-                          {(() => {
-                            const oStatus = orderStatuses.find(s => s.barcode === it.barcode);
-                            if (oStatus?.isOrdered) {
-                              return (
-                                <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-200">
-                                  สั่งซื้อรอจัดส่ง (Lot: {oStatus.lotNumber || "-"})
-                                </span>
-                              );
-                            }
-                            return null;
-                          })()}
-                        </div>
+                        {f.recommendedOrder > 0 ? (
+                          <span className="font-bold text-amber-700 font-mono text-sm bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                            +{f.recommendedOrder.toLocaleString()} {it.unit}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 text-[11px]">เพียงพอ</span>
+                        )}
                       </td>
                       <td className="p-3 text-right font-mono font-bold text-emerald-700">
                         {f.estimatedCost > 0
                           ? `฿${f.estimatedCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
                           : "-"}
                       </td>
-                      <td className="p-3 text-center">
-                        {f.riskLevel === "critical" ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800">
-                            <AlertTriangle className="w-3 h-3" /> วิกฤต
-                          </span>
-                        ) : f.riskLevel === "warning" ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800">
-                            สั่งซื้อ {forecastHorizon}M
-                          </span>
-                        ) : f.riskLevel === "overstock" ? (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
-                            สต็อกล้น
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-50 text-emerald-700">
-                            เพียงพอ
-                          </span>
-                        )}
+                                            <td className="p-3 text-center">
+                        <div className="flex flex-col items-center gap-1">
+                          {f.riskLevel === "critical" ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800">
+                              <AlertTriangle className="w-3 h-3" /> วิกฤต
+                            </span>
+                          ) : f.riskLevel === "warning" ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800">
+                              สั่งซื้อ {forecastHorizon}M
+                            </span>
+                          ) : f.riskLevel === "overstock" ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                              สต็อกล้น
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-50 text-emerald-700">
+                              เพียงพอ
+                            </span>
+                          )}
+                          {(() => {
+                            const oStatus = orderStatuses.find(s => s.barcode === it.barcode);
+                            if (oStatus?.isOrdered) {
+                              return (
+                                <div className="mt-1">
+                                  <span className="inline-block text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-200">
+                                    สั่งซื้อรอจัดส่ง (Lot: {oStatus.lotNumber || "-"})
+                                  </span>
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </div>
                       </td>
+                      
                       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
                         <button
                           onClick={() => onQuickMove(it, "in")}
@@ -920,6 +945,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
           </div>
         )}
       </div>
+
     </div>
   );
 };

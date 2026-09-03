@@ -125,7 +125,6 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ barcode: item.barcode, isOrdered, lotNumber })
       });
-      fetchOrderStatuses();
     } catch (e) {
       console.error(e);
       alert("เกิดข้อผิดพลาดในการบันทึกสถานะ");
@@ -159,7 +158,6 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ barcode: targetItem.barcode, isOrdered: false, lotNumber: "" })
         });
-        fetchOrderStatuses();
       } catch (e) {
         console.error(e);
       }
@@ -176,7 +174,6 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ lotNumber: targetLot, isOrdered: false })
         });
-        fetchOrderStatuses();
       } catch (e) {
         console.error(e);
       }
@@ -852,9 +849,16 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
                             <CheckCircle2 className="w-3 h-3" /> เพียงพอ
                           </span>
                         )}
-                        <div className="text-[9px] text-slate-400 mt-0.5">
+<div className="text-[9px] text-slate-400 mt-0.5">
                           {r.monthsOfStockRemaining > 90 ? ">90" : r.monthsOfStockRemaining.toFixed(1)} ด.
                         </div>
+                        {isOrdered && (
+                          <div className="mt-1">
+                            <span className="inline-block text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-200">
+                              สั่งซื้อรอจัดส่ง (Lot: {oStatus?.lotNumber || "-"})
+                            </span>
+                          </div>
+                        )}
                       </td>
 
 
