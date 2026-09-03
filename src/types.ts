@@ -120,7 +120,8 @@ export type PermissionKey =
   | "addItem"
   | "importExport"
   | "employees"
-  | "backup";
+  | "backup"
+  | "manageOrderStatus";
 
 export type EmployeePermissions = {
   view?: boolean;
@@ -136,6 +137,7 @@ export type EmployeePermissions = {
   importExport?: boolean;
   employees?: boolean;
   backup?: boolean;
+  manageOrderStatus?: boolean;
   [key: string]: boolean | undefined;
 };
 

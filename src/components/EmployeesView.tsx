@@ -49,6 +49,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     importExport: false,
     employees: false,
     backup: false,
+    manageOrderStatus: false,
   };
 
   const [formData, setFormData] = useState<Partial<Employee>>({
@@ -86,6 +87,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         issue: Boolean(emp.perms?.issue),
         viewAlerts: emp.perms?.viewAlerts ?? emp.perms?.view ?? true,
         viewForecast: emp.perms?.viewForecast ?? emp.perms?.view ?? true,
+        manageOrderStatus: Boolean(emp.perms?.manageOrderStatus),
       },
     });
     setIsCreating(false);
@@ -194,6 +196,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
           importExport: true,
           employees: false,
           backup: false,
+          manageOrderStatus: true,
         },
       });
     }
@@ -225,6 +228,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
       importExport: Boolean(formData.perms?.importExport),
       employees: Boolean(formData.perms?.employees),
       backup: Boolean(formData.perms?.backup),
+      manageOrderStatus: Boolean(formData.perms?.manageOrderStatus),
     };
 
     if (isCreating) {

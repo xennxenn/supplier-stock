@@ -5,16 +5,22 @@ import { createServer as createViteServer } from "vite";
 import Papa from "papaparse";
 import type { StockItem, Transaction, SheetsSyncData, Employee, BackupEntry } from "./src/types";
 
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, getDocs, doc, setDoc, deleteDoc, writeBatch, query, orderBy, limit, setLogLevel } from "firebase/firestore";
+
+try {
+  setLogLevel("error");
+} catch {}
+
+const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf8'));
+const appFirebase = initializeApp(firebaseConfig);
+const db = getFirestore(appFirebase, firebaseConfig.firestoreDatabaseId);
 const app = express();
 const PORT = 3000;
-
-// Security: Disable X-Powered-By header to prevent fingerprinting
 app.disable("x-powered-by");
-
-// Security: Safe JSON payload limit (10MB) to mitigate memory exhaustion DoS
 app.use(express.json({ limit: "10mb" }));
 
-// Security Headers Middleware
+
 app.use((_req, res, next) => {
   // Prevent MIME-sniffing
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -137,6 +143,7 @@ const DEFAULT_EMPLOYEES: Employee[] = [
       importExport: true,
       employees: true,
       backup: true,
+      manageOrderStatus: true,
     },
   },
   {
@@ -164,6 +171,7 @@ const DEFAULT_EMPLOYEES: Employee[] = [
       importExport: true,
       employees: false,
       backup: false,
+      manageOrderStatus: true,
     },
   },
   {
@@ -191,6 +199,7 @@ const DEFAULT_EMPLOYEES: Employee[] = [
       importExport: true,
       employees: false,
       backup: false,
+      manageOrderStatus: true,
     },
   },
   {
@@ -225,6 +234,7 @@ const DEFAULT_EMPLOYEES: Employee[] = [
       importExport: false,
       employees: false,
       backup: false,
+      manageOrderStatus: true,
     },
   },
   {
@@ -252,84 +262,78 @@ const DEFAULT_EMPLOYEES: Employee[] = [
       importExport: true,
       employees: false,
       backup: false,
+      manageOrderStatus: true,
     },
   },
 ];
 
-function getStoredEmployees(): Employee[] {
+async function getStoredEmployees(): Promise<Employee[]> {
   try {
-    if (fs.existsSync(EMPLOYEES_FILE)) {
-      const data = fs.readFileSync(EMPLOYEES_FILE, "utf-8");
-      const parsed = JSON.parse(data);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
-    }
+    const snap = await getDocs(collection(db, "employees"));
+    if (snap.empty) return DEFAULT_EMPLOYEES;
+    return snap.docs.map(doc => doc.data() as Employee);
   } catch (err) {
-    console.warn("Could not read employees.json, falling back to default:", err);
+    console.error("Failed to read employees from Firestore:", err);
+    return DEFAULT_EMPLOYEES;
   }
-  // Initialize with default
-  try {
-    fs.writeFileSync(EMPLOYEES_FILE, JSON.stringify(DEFAULT_EMPLOYEES, null, 2), "utf-8");
-  } catch (e) {
-    // ignore
-  }
-  return DEFAULT_EMPLOYEES;
 }
 
-function saveStoredEmployees(emps: Employee[]) {
+async function saveStoredEmployees(emps: Employee[]) {
   try {
     fs.writeFileSync(EMPLOYEES_FILE, JSON.stringify(emps, null, 2), "utf-8");
+    const batch = writeBatch(db);
+    const snap = await getDocs(collection(db, "employees"));
+    snap.docs.forEach(doc => batch.delete(doc.ref));
+    emps.forEach(emp => {
+      batch.set(doc(db, "employees", emp.id), emp);
+    });
+    await batch.commit();
   } catch (err) {
-    console.error("Failed to save employees.json:", err);
+    console.error("Failed to save employees to Firestore/disk:", err);
   }
 }
 
-function getStoredCustomTransactions(): Transaction[] {
+async function getStoredCustomTransactions(): Promise<Transaction[]> {
   try {
-    if (fs.existsSync(TX_FILE)) {
-      const data = fs.readFileSync(TX_FILE, "utf-8");
-      const parsed = JSON.parse(data);
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
-    }
+    const q = query(collection(db, "customTransactions"), orderBy("timestamp", "desc"), limit(5000));
+    const snap = await getDocs(q);
+    return snap.docs.map(doc => doc.data() as Transaction);
   } catch (err) {
-    console.warn("Could not read custom_transactions.json:", err);
-  }
-  return [];
-}
-
-function appendStoredCustomTransaction(tx: Transaction) {
-  try {
-    const list = getStoredCustomTransactions();
-    // Check duplicate by id
-    const filtered = list.filter((t) => t.id !== tx.id);
-    filtered.unshift(tx);
-    fs.writeFileSync(TX_FILE, JSON.stringify(filtered.slice(0, 5000), null, 2), "utf-8");
-  } catch (err) {
-    console.error("Failed to write custom_transactions.json:", err);
+    console.error("Failed to read custom transactions from Firestore:", err);
+    return [];
   }
 }
 
-function getStoredBackups(): BackupEntry[] {
+async function appendStoredCustomTransaction(tx: Transaction) {
   try {
-    if (fs.existsSync(BACKUPS_FILE)) {
-      const data = fs.readFileSync(BACKUPS_FILE, "utf-8");
-      const parsed = JSON.parse(data);
-      if (Array.isArray(parsed)) return parsed;
-    }
+    await setDoc(doc(db, "customTransactions", tx.id), tx);
   } catch (err) {
-    console.warn("Could not read backups.json:", err);
+    console.error("Failed to write custom transaction to Firestore:", err);
   }
-  return [];
 }
 
-function saveStoredBackups(backups: BackupEntry[]) {
+async function getStoredBackups(): Promise<BackupEntry[]> {
   try {
-    fs.writeFileSync(BACKUPS_FILE, JSON.stringify(backups.slice(0, 50), null, 2), "utf-8");
+    const q = query(collection(db, "backups"), orderBy("timestamp", "desc"));
+    const snap = await getDocs(q);
+    return snap.docs.map(doc => doc.data() as BackupEntry);
   } catch (err) {
-    console.error("Failed to save backups.json:", err);
+    console.error("Failed to read backups from Firestore:", err);
+    return [];
+  }
+}
+
+async function saveStoredBackups(backups: BackupEntry[]) {
+  try {
+    const batch = writeBatch(db);
+    const snap = await getDocs(collection(db, "backups"));
+    snap.docs.forEach(doc => batch.delete(doc.ref));
+    backups.forEach(b => {
+      batch.set(doc(db, "backups", b.id), b);
+    });
+    await batch.commit();
+  } catch (err) {
+    console.error("Failed to save backups to Firestore:", err);
   }
 }
 
@@ -341,57 +345,96 @@ export interface OrderStatus {
   updatedAt: string;
 }
 
-function getStoredOrderStatus(): OrderStatus[] {
+async function getStoredOrderStatus(): Promise<OrderStatus[]> {
   try {
-    if (fs.existsSync(ORDER_STATUS_FILE)) {
-      const data = fs.readFileSync(ORDER_STATUS_FILE, "utf-8");
-      const parsed = JSON.parse(data);
-      if (Array.isArray(parsed)) return parsed;
-    }
+    const snap = await getDocs(collection(db, "orderStatuses"));
+    return snap.docs.map(doc => doc.data() as OrderStatus);
   } catch (err) {
-    console.warn("Could not read order_status.json:", err);
+    console.error("Failed to read order statuses from Firestore:", err);
+    return [];
   }
-  return [];
 }
 
-app.get("/api/order-status", (req, res) => {
-  res.json({ success: true, statuses: getStoredOrderStatus() });
+app.get("/api/order-status", async (req, res) => {
+  res.json({ success: true, statuses: await getStoredOrderStatus() });
 });
 
-app.post("/api/order-status", rateLimiter(40), (req, res) => {
+app.post("/api/order-status", rateLimiter(40), async (req, res) => {
   try {
     const { barcode, isOrdered, lotNumber } = req.body;
     if (!barcode) return res.status(400).json({ success: false, error: "Missing barcode" });
-    const statuses = getStoredOrderStatus();
+    const statuses = await getStoredOrderStatus();
     const idx = statuses.findIndex((s) => s.barcode === barcode);
-    if (idx >= 0) {
-      statuses[idx] = { barcode, isOrdered: !!isOrdered, lotNumber: String(lotNumber || ""), updatedAt: new Date().toISOString() };
+    if (!isOrdered) {
+      if (idx >= 0) {
+        statuses.splice(idx, 1);
+      }
+      try {
+        await deleteDoc(doc(db, "orderStatuses", barcode));
+      } catch (e) {
+        console.warn("Delete order status doc error:", e);
+      }
     } else {
-      statuses.push({ barcode, isOrdered: !!isOrdered, lotNumber: String(lotNumber || ""), updatedAt: new Date().toISOString() });
+      const entry: OrderStatus = {
+        barcode,
+        isOrdered: true,
+        lotNumber: String(lotNumber || ""),
+        updatedAt: new Date().toISOString(),
+      };
+      if (idx >= 0) {
+        statuses[idx] = entry;
+      } else {
+        statuses.push(entry);
+      }
+      await setDoc(doc(db, "orderStatuses", barcode), entry);
     }
-    fs.writeFileSync(ORDER_STATUS_FILE, JSON.stringify(statuses, null, 2), "utf-8");
     res.json({ success: true, statuses });
   } catch (err) {
     res.status(500).json({ success: false, error: String(err) });
   }
 });
 
-app.post("/api/order-status-batch", rateLimiter(40), (req, res) => {
+app.post("/api/order-status-batch", rateLimiter(40), async (req, res) => {
   try {
     const { lotNumber, isOrdered } = req.body;
     if (!lotNumber) return res.status(400).json({ success: false, error: "Missing lotNumber" });
-    const statuses = getStoredOrderStatus();
-    
-    // Update all matching lotNumbers
-    statuses.forEach(s => {
-      if (s.lotNumber === lotNumber) {
-        s.isOrdered = !!isOrdered;
-        s.updatedAt = new Date().toISOString();
-      }
-    });
+    const statuses = await getStoredOrderStatus();
+    if (!isOrdered) {
+      const cleanTarget = String(lotNumber).trim().toLowerCase();
+      const isMatch = (s: OrderStatus) => {
+        if (cleanTarget === "__all__") return true;
+        if (cleanTarget === "ไม่ระบุ lot" || cleanTarget === "unspecified") {
+          return !s.lotNumber || s.lotNumber.trim() === "";
+        }
+        return (s.lotNumber || "").trim().toLowerCase() === cleanTarget;
+      };
 
-    fs.writeFileSync(ORDER_STATUS_FILE, JSON.stringify(statuses, null, 2), "utf-8");
-    res.json({ success: true, statuses });
+      const toClear = statuses.filter(isMatch);
+      for (let i = 0; i < toClear.length; i += 400) {
+        const chunk = toClear.slice(i, i + 400);
+        const batch = writeBatch(db);
+        chunk.forEach(s => {
+          batch.delete(doc(db, "orderStatuses", s.barcode));
+        });
+        await batch.commit();
+      }
+      const remaining = statuses.filter(s => !isMatch(s));
+      res.json({ success: true, statuses: remaining });
+    } else {
+      const cleanTarget = String(lotNumber).trim().toLowerCase();
+      const toUpdate = statuses.filter(s => (s.lotNumber || "").trim().toLowerCase() === cleanTarget);
+      for (let i = 0; i < toUpdate.length; i += 400) {
+        const chunk = toUpdate.slice(i, i + 400);
+        const batch = writeBatch(db);
+        chunk.forEach(s => {
+          s.isOrdered = true;
+          s.updatedAt = new Date().toISOString();
+          batch.set(doc(db, "orderStatuses", s.barcode), s);
+        });
+        await batch.commit();
+      }
+      res.json({ success: true, statuses });
+    }
   } catch (err) {
     res.status(500).json({ success: false, error: String(err) });
   }
@@ -541,7 +584,7 @@ async function fetchAndParseSheets(force = false): Promise<SheetsSyncData> {
     .filter((t) => t.barcode !== "" || t.itemName !== "" || t.date !== "");
 
   // Load custom transactions that were recorded via the web application
-  const storedCustomTxs = getStoredCustomTransactions();
+  const storedCustomTxs = await getStoredCustomTransactions();
   
   // Merge custom transactions (avoid duplicates)
   const existingTxIds = new Set(transactions.map((t) => t.id));
@@ -895,9 +938,9 @@ app.post("/api/transactions", rateLimiter(80), (req, res) => {
 });
 
 // Employees Endpoints - Persistent Shared Storage
-app.get("/api/employees", rateLimiter(120), (_req, res) => {
+app.get("/api/employees", rateLimiter(120), async (_req, res) => {
   try {
-    const emps = getStoredEmployees();
+    const emps = await getStoredEmployees();
     res.json({ success: true, employees: emps });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -905,7 +948,7 @@ app.get("/api/employees", rateLimiter(120), (_req, res) => {
 });
 
 // Authentication Endpoint - Direct Server-side Validation
-app.post("/api/login", rateLimiter(40), (req, res) => {
+app.post("/api/login", rateLimiter(40), async (req, res) => {
   try {
     const { username = "", password = "" } = req.body || {};
     const cleanUser = String(username).replace(/<[^>]*>?/gm, "").trim().toLowerCase();
@@ -915,7 +958,7 @@ app.post("/api/login", rateLimiter(40), (req, res) => {
       return res.status(400).json({ success: false, error: "กรุณาระบุชื่อผู้ใช้งานและรหัสผ่าน" });
     }
 
-    const emps = getStoredEmployees();
+    const emps = await getStoredEmployees();
     const matched = emps.find((e) => {
       const u = (e.username || "").toLowerCase().trim();
       const code = (e.employeeCode || "").toLowerCase().trim();
@@ -946,7 +989,7 @@ app.post("/api/login", rateLimiter(40), (req, res) => {
   }
 });
 
-app.post("/api/employees", rateLimiter(60), (req, res) => {
+app.post("/api/employees", rateLimiter(60), async (req, res) => {
   try {
     const { employees: rawEmps } = req.body;
     if (!Array.isArray(rawEmps) || rawEmps.length === 0) {
@@ -983,10 +1026,11 @@ app.post("/api/employees", rateLimiter(60), (req, res) => {
         importExport: Boolean(e.perms?.importExport),
         employees: Boolean(e.perms?.employees),
         backup: Boolean(e.perms?.backup),
+        manageOrderStatus: Boolean(e.perms?.manageOrderStatus),
       },
     }));
 
-    saveStoredEmployees(sanitizedEmps);
+    await saveStoredEmployees(sanitizedEmps);
     res.json({ success: true, employees: sanitizedEmps });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -994,35 +1038,35 @@ app.post("/api/employees", rateLimiter(60), (req, res) => {
 });
 
 // Backups Endpoints - Persistent Shared Storage
-app.get("/api/backups", rateLimiter(80), (_req, res) => {
+app.get("/api/backups", rateLimiter(80), async (_req, res) => {
   try {
-    const backups = getStoredBackups();
+    const backups = await getStoredBackups();
     res.json({ success: true, backups });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post("/api/backups", rateLimiter(30), (req, res) => {
+app.post("/api/backups", rateLimiter(30), async (req, res) => {
   try {
     const backup = req.body as BackupEntry;
     if (!backup || !backup.id) {
       return res.status(400).json({ success: false, error: "Invalid backup data" });
     }
     const current = getStoredBackups();
-    const updated = [backup, ...current.filter((b) => b.id !== backup.id)];
-    saveStoredBackups(updated);
+    const updated = [backup, ...((await current) || []).filter((b: any) => b.id !== backup.id)];
+    await saveStoredBackups(updated);
     res.json({ success: true, backup });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.delete("/api/backups/:id", rateLimiter(30), (req, res) => {
+app.delete("/api/backups/:id", rateLimiter(30), async (req, res) => {
   try {
     const { id } = req.params;
     const current = getStoredBackups();
-    const updated = current.filter((b) => b.id !== id);
+    const updated = ((await current) || []).filter((b: any) => b.id !== id);
     saveStoredBackups(updated);
     res.json({ success: true });
   } catch (err: any) {

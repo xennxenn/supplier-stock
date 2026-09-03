@@ -67,6 +67,12 @@ export const PERMISSION_DEFINITIONS: Array<{
     description: "ดาวน์โหลดไฟล์ Excel หรือส่งออกข้อมูลตาราง",
   },
   {
+    key: "manageOrderStatus",
+    label: "จัดการรอบสั่งซื้อ & ติ๊กสถานะ Lot (Order Lot Management)",
+    category: "สิทธิ์การดำเนินการ (Actions)",
+    description: "สร้าง/บันทึกเลขที่ Lot สั่งซื้อ, ติ๊กหมายเหตุสั่งซื้อ, และล้างรอบสั่งซื้อ (หน้าเตือนสั่งซื้อ & พยากรณ์)",
+  },
+  {
     key: "employees",
     label: "จัดการพนักงาน & สิทธิ์ (Employees)",
     category: "เมนูหลัก (Navigation Tabs)",
@@ -105,6 +111,13 @@ export function hasPermission(
     perm === "viewForecast"
   ) {
     return user.perms.view !== false;
+  }
+
+  // Fallback for manageOrderStatus: if not explicitly defined, default to true for managers or staff with warehouse actions
+  if (perm === "manageOrderStatus") {
+    if (user.role === "manager" || user.perms.receive || user.perms.issue || user.perms.addItem) {
+      return true;
+    }
   }
 
   return Boolean(user.perms[perm]);

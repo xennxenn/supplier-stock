@@ -1,4 +1,6 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
+import { onSnapshot, setDoc, doc, deleteDoc, writeBatch } from "firebase/firestore";
+import { orderStatusCol, db } from "../lib/firebase";
 import {
   TrendingUp,
   Calendar,
@@ -20,6 +22,11 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  Trash2,
+  Tag,
+  BookmarkCheck,
+  AlertCircle,
+  X,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -31,9 +38,9 @@ import {
   Legend,
 } from "recharts";
 import type { StockItem, Transaction, ForecastItem, Employee, OrderStatus } from "../types";
-import { useEffect } from "react";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
+import { OrderLotManager } from "./OrderLotManager";
 
 interface ForecastPlanningViewProps {
   items: StockItem[];
@@ -80,24 +87,178 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   const [sortField, setSortField] = useState<ForecastSortField>("estimatedCost");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
+  const canManageOrderStatus = hasPermission(currentUser, "manageOrderStatus");
+
   const [orderStatuses, setOrderStatuses] = useState<OrderStatus[]>([]);
-
-  
-
-  const fetchOrderStatuses = async () => {
+  const [activeLotNumber, setActiveLotNumber] = useState<string>(() => {
     try {
-      const res = await fetch("/api/order-status");
-      const data = await res.json();
-      if (data.success && data.statuses) {
-        setOrderStatuses(data.statuses);
+      return localStorage.getItem("pasaya_active_order_lot") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [lotInput, setLotInput] = useState<string>(() => {
+    try {
+      return localStorage.getItem("pasaya_active_order_lot") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [showClearLotModal, setShowClearLotModal] = useState<boolean>(false);
+  const [selectedLotToClear, setSelectedLotToClear] = useState<string>("");
+  const [isClearing, setIsClearing] = useState<boolean>(false);
+
+  // Calculate items count per Lot
+  const lotStats = useMemo(() => {
+    const counts = new Map<string, number>();
+    orderStatuses.forEach((s) => {
+      if (s.isOrdered) {
+        const lot = s.lotNumber && s.lotNumber.trim() !== "" ? s.lotNumber.trim() : "ไม่ระบุ Lot";
+        counts.set(lot, (counts.get(lot) || 0) + 1);
       }
-    } catch (e) {
-      console.error(e);
+    });
+    return counts;
+  }, [orderStatuses]);
+
+  const uniqueLots = useMemo(() => {
+    return Array.from(lotStats.keys()).sort();
+  }, [lotStats]);
+
+  const handleSaveActiveLot = () => {
+    if (!canManageOrderStatus) {
+      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
+      return;
+    }
+    const trimmed = lotInput.trim();
+    if (!trimmed) {
+      alert("กรุณาระบุ หรือเลือกเลขที่ Lot การสั่งซื้อก่อนกดบันทึก");
+      return;
+    }
+    setActiveLotNumber(trimmed);
+    try {
+      localStorage.setItem("pasaya_active_order_lot", trimmed);
+    } catch {}
+  };
+
+  const handleUnlockLot = () => {
+    setActiveLotNumber("");
+    setLotInput("");
+    try {
+      localStorage.removeItem("pasaya_active_order_lot");
+    } catch {}
+  };
+
+  const handleToggleOrderStatus = async (barcode: string, checked: boolean) => {
+    if (!canManageOrderStatus) {
+      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
+      return;
+    }
+    if (!activeLotNumber) {
+      alert("กรุณาสร้างหรือเลือกเลขที่ Lot และกดปุ่ม 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ");
+      return;
+    }
+    try {
+      const ref = doc(db, "orderStatuses", barcode);
+      if (checked) {
+        await setDoc(ref, {
+          barcode,
+          isOrdered: true,
+          lotNumber: activeLotNumber,
+          updatedAt: new Date().toISOString(),
+        });
+        fetch("/api/order-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ barcode, isOrdered: true, lotNumber: activeLotNumber }),
+        }).catch((err) => console.warn("Sync order status fallback:", err));
+      } else {
+        await deleteDoc(ref);
+        fetch("/api/order-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ barcode, isOrdered: false, lotNumber: "" }),
+        }).catch((err) => console.warn("Sync order status fallback:", err));
+      }
+    } catch (err) {
+      console.error("Error updating order status:", err);
+      alert("เกิดข้อผิดพลาดในการบันทึกข้อมูล กรุณาลองใหม่อีกครั้ง");
     }
   };
 
+  const handleClearLot = async (targetLot: string) => {
+    if (!canManageOrderStatus) {
+      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบ");
+      return;
+    }
+    if (!targetLot) return;
+
+    setIsClearing(true);
+    try {
+      const cleanTarget = targetLot.trim().toLowerCase();
+      const isMatch = (s: OrderStatus) => {
+        if (!s.isOrdered) return false;
+        if (cleanTarget === "__all__") return true;
+        if (cleanTarget === "ไม่ระบุ lot" || cleanTarget === "unspecified") {
+          return !s.lotNumber || s.lotNumber.trim() === "";
+        }
+        return (s.lotNumber || "").trim().toLowerCase() === cleanTarget;
+      };
+
+      const toDelete = orderStatuses.filter(isMatch);
+
+      // 1. Optimistic UI update immediately
+      const toDeleteBarcodes = new Set(toDelete.map((s) => s.barcode));
+      setOrderStatuses((prev) => prev.filter((s) => !toDeleteBarcodes.has(s.barcode)));
+
+      // 2. Delete in Firestore in chunks of 400
+      if (toDelete.length > 0) {
+        for (let i = 0; i < toDelete.length; i += 400) {
+          const chunk = toDelete.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach((s) => {
+            batch.delete(doc(db, "orderStatuses", s.barcode));
+          });
+          await batch.commit();
+        }
+      }
+
+      // 3. Sync through server endpoint
+      fetch("/api/order-status-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lotNumber: targetLot, isOrdered: false }),
+      }).catch((err) => console.warn("Sync batch clear fallback:", err));
+
+      // 4. Reset active lot if it was cleared
+      if (
+        cleanTarget === "__all__" ||
+        (activeLotNumber || "").trim().toLowerCase() === cleanTarget
+      ) {
+        setActiveLotNumber("");
+        setLotInput("");
+        try {
+          localStorage.removeItem("pasaya_active_order_lot");
+        } catch {}
+      }
+
+      setShowClearLotModal(false);
+      setSelectedLotToClear("");
+    } catch (err) {
+      console.error("Error clearing lot:", err);
+      alert("เกิดข้อผิดพลาดในการล้างข้อมูล Lot");
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
+  
+
   useEffect(() => {
-    fetchOrderStatuses();
+    const unsubscribe = onSnapshot(orderStatusCol, (snapshot) => {
+      const statuses = snapshot.docs.map(doc => doc.data() as OrderStatus);
+      setOrderStatuses(statuses);
+    });
+    return () => unsubscribe();
   }, []);
 
 
@@ -335,32 +496,42 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
       "ราคาต่อหน่วย (บาท)",
       "งบประมาณสั่งซื้อ (บาท)",
       "ระดับความเสี่ยง",
+      "หมายเหตุสั่งซื้อ",
+      "เลขที่ Lot สั่งซื้อ",
       "Supplier",
     ];
 
-    const rows = sortedItems.map((f) => [
-      f.item.barcode || "",
-      f.item.name || "",
-      f.item.category || "",
-      f.item.line || "",
-      f.item.unit || "",
-      f.item.currentBalance || 0,
-      f.item.minStock || 0,
-      f.monthlyBurnRate || 0,
-      f.projectedDemand || 0,
-      f.monthsOfStockRemaining > 90 ? ">90" : f.monthsOfStockRemaining,
-      f.recommendedOrder || 0,
-      f.item.unitCost || 0,
-      parseFloat(f.estimatedCost.toFixed(2)),
-      f.riskLevel === "critical"
-        ? "วิกฤต (หมดใน < 1 เดือน)"
-        : f.riskLevel === "warning"
-        ? `ไม่พอ ${forecastHorizon} เดือน`
-        : f.riskLevel === "overstock"
-        ? "สต็อกล้น"
-        : "เพียงพอ",
-      f.item.supplier || "",
-    ]);
+    const rows = sortedItems.map((f) => {
+      const oStatus = orderStatuses.find((s) => s.barcode === f.item.barcode);
+      const isOrdered = oStatus?.isOrdered || false;
+      const lotNumber = isOrdered ? (oStatus?.lotNumber || "-") : "-";
+
+      return [
+        f.item.barcode || "",
+        f.item.name || "",
+        f.item.category || "",
+        f.item.line || "",
+        f.item.unit || "",
+        f.item.currentBalance || 0,
+        f.item.minStock || 0,
+        f.monthlyBurnRate || 0,
+        f.projectedDemand || 0,
+        f.monthsOfStockRemaining > 90 ? ">90" : f.monthsOfStockRemaining,
+        f.recommendedOrder || 0,
+        f.item.unitCost || 0,
+        parseFloat(f.estimatedCost.toFixed(2)),
+        f.riskLevel === "critical"
+          ? "วิกฤต (หมดใน < 1 เดือน)"
+          : f.riskLevel === "warning"
+          ? `ไม่พอ ${forecastHorizon} เดือน`
+          : f.riskLevel === "overstock"
+          ? "สต็อกล้น"
+          : "เพียงพอ",
+        isOrdered ? "สั่งซื้อแล้ว" : "ยังไม่สั่ง",
+        lotNumber,
+        f.item.supplier || "",
+      ];
+    });
 
     return { headers, rows };
   };
@@ -708,6 +879,24 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
         </div>
       </div>
 
+      
+      {/* Order Lot Management Bar & Modal */}
+      <OrderLotManager
+        orderStatuses={orderStatuses}
+        activeLotNumber={activeLotNumber}
+        lotInput={lotInput}
+        canManageOrderStatus={canManageOrderStatus}
+        onLotInputChange={setLotInput}
+        onSaveActiveLot={handleSaveActiveLot}
+        onUnlockLot={handleUnlockLot}
+        onClearLot={handleClearLot}
+        isClearing={isClearing}
+        showClearLotModal={showClearLotModal}
+        setShowClearLotModal={setShowClearLotModal}
+        selectedLotToClear={selectedLotToClear}
+        setSelectedLotToClear={setSelectedLotToClear}
+      />
+
       {/* Forecast Data Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
@@ -822,7 +1011,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
             <tbody className="divide-y divide-slate-100">
               {sortedItems.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="text-center py-12 text-slate-400 text-sm">
+                  <td colSpan={13} className="text-center py-12 text-slate-400 text-sm">
                     ไม่พบรายการที่ตรงกับเงื่อนไขการกรอง
                   </td>
                 </tr>
@@ -848,6 +1037,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                           {it.supplier && <span>| Supplier: {it.supplier}</span>}
                         </div>
                       </td>
+
                       <td className="p-3 text-slate-600">{it.line || "-"}</td>
                       <td className="p-3 text-right font-mono font-bold">
                         <span className={it.currentBalance <= 0 ? "text-rose-600" : "text-slate-900"}>
@@ -888,7 +1078,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                           ? `฿${f.estimatedCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
                           : "-"}
                       </td>
-                                            <td className="p-3 text-center">
+                      <td className="p-3 text-center">
                         <div className="flex flex-col items-center gap-1">
                           {f.riskLevel === "critical" ? (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800">
@@ -907,22 +1097,66 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                               เพียงพอ
                             </span>
                           )}
-                          {(() => {
-                            const oStatus = orderStatuses.find(s => s.barcode === it.barcode);
-                            if (oStatus?.isOrdered) {
-                              return (
-                                <div className="mt-1">
-                                  <span className="inline-block text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-200">
-                                    สั่งซื้อรอจัดส่ง (Lot: {oStatus.lotNumber || "-"})
-                                  </span>
-                                </div>
-                              );
-                            }
-                            return null;
-                          })()}
                         </div>
                       </td>
+
+                      {/* Column 12: หมายเหตุสั่งซื้อ */}
+                      <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
+                        {(() => {
+                          const oStatus = orderStatuses.find((s) => s.barcode === it.barcode);
+                          const isOrdered = oStatus?.isOrdered || false;
+                          const isCurrentLot = isOrdered && activeLotNumber && oStatus?.lotNumber === activeLotNumber;
+
+                          return (
+                            <div className="flex flex-col items-center justify-center gap-1">
+                              <label
+                                className={`inline-flex items-center gap-1.5 ${
+                                  !activeLotNumber || !canManageOrderStatus ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                                }`}
+                                title={
+                                  !canManageOrderStatus
+                                    ? "คุณไม่มีสิทธิ์จัดการสถานะสั่งซื้อ (กำหนดได้ในเมนู พนักงาน & สิทธิ์)"
+                                    : !activeLotNumber
+                                    ? "กรุณาสร้างหรือเลือก และกด 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ"
+                                    : isOrdered
+                                    ? `คลิกเพื่อยกเลิกสถานะสั่งซื้อ (Lot: ${oStatus?.lotNumber || "-"})`
+                                    : `คลิกเพื่อบันทึกสั่งซื้อเข้า Lot: ${activeLotNumber}`
+                                }
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer disabled:cursor-not-allowed accent-indigo-600"
+                                  disabled={!activeLotNumber || !canManageOrderStatus}
+                                  checked={isOrdered}
+                                  onChange={(e) => handleToggleOrderStatus(it.barcode, e.target.checked)}
+                                />
+                                <span
+                                  className={`text-[11px] font-medium select-none ${
+                                    isOrdered ? "text-emerald-700 font-semibold" : "text-slate-400"
+                                  }`}
+                                >
+                                  {isOrdered ? "สั่งซื้อแล้ว" : "ยังไม่สั่ง"}
+                                </span>
+                              </label>
+
+                              {isOrdered && (
+                                <span
+                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                    isCurrentLot
+                                      ? "bg-emerald-100 text-emerald-800 border-emerald-300 shadow-xs"
+                                      : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                  }`}
+                                  title={`เลขที่รอบ Lot: ${oStatus?.lotNumber || "-"}`}
+                                >
+                                  Lot: {oStatus?.lotNumber || "-"}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </td>
                       
+                      {/* Column 13: จัดการ */}
                       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
                         <button
                           onClick={() => onQuickMove(it, "in")}

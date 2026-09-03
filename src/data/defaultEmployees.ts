@@ -26,6 +26,7 @@ export const INITIAL_EMPLOYEES: Employee[] = [
       importExport: true,
       employees: true,
       backup: true,
+      manageOrderStatus: true,
     },
   },
   {
@@ -53,6 +54,7 @@ export const INITIAL_EMPLOYEES: Employee[] = [
       importExport: true,
       employees: false,
       backup: false,
+      manageOrderStatus: true,
     },
   },
   {
@@ -80,6 +82,7 @@ export const INITIAL_EMPLOYEES: Employee[] = [
       importExport: true,
       employees: false,
       backup: false,
+      manageOrderStatus: true,
     },
   },
   {
@@ -114,6 +117,7 @@ export const INITIAL_EMPLOYEES: Employee[] = [
       importExport: false,
       employees: false,
       backup: false,
+      manageOrderStatus: true,
     },
   },
   {
@@ -141,6 +145,7 @@ export const INITIAL_EMPLOYEES: Employee[] = [
       importExport: true,
       employees: false,
       backup: false,
+      manageOrderStatus: true,
     },
   },
 ];
