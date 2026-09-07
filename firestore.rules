@@ -1,8 +1,44 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if true;
+
+    function isValidEmployee(data) {
+      return data.id is string
+        && data.name is string
+        && data.name.size() > 0
+        && data.role in ['admin', 'manager', 'staff']
+        && data.perms is map;
+    }
+
+    function isValidOrderStatus(data) {
+      return data.itemKey is string
+        && data.status in ['none', 'ordering', 'ordered', 'received'];
+    }
+
+    function isValidCustomTx(data) {
+      return data.id is string
+        && data.itemCode is string
+        && data.type in ['in', 'out']
+        && data.qty is number;
+    }
+
+    match /employees/{employeeId} {
+      allow read: if true;
+      allow create, update: if isValidEmployee(request.resource.data);
+      allow delete: if true;
+    }
+
+    match /orderStatuses/{itemKey} {
+      allow read: if true;
+      allow create, update: if isValidOrderStatus(request.resource.data);
+      allow delete: if true;
+    }
+
+    match /customTransactions/{txId} {
+      allow read: if true;
+      allow create, update: if isValidCustomTx(request.resource.data);
+      allow delete: if true;
     }
   }
 }
+

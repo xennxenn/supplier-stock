@@ -17,6 +17,12 @@ import {
   fetchEmployeesOnline,
   saveEmployeesOnline,
 } from "./api";
+import {
+  employeesCol,
+  onSnapshot,
+  handleFirestoreError,
+  OperationType,
+} from "./lib/firebase";
 import type {
   StockItem,
   Transaction,
@@ -190,6 +196,34 @@ export default function App() {
     syncEmployees();
     performSync(false);
 
+    // 1. Real-time live listener for employees from Cloud Firestore (sync across all devices instantly)
+    const unsubscribeEmps = onSnapshot(
+      employeesCol,
+      (snapshot) => {
+        if (!snapshot.empty) {
+          const liveList: Employee[] = snapshot.docs.map((docSnap) => docSnap.data() as Employee);
+          if (liveList.length > 0) {
+            setEmployees(liveList);
+            try {
+              localStorage.setItem("pasaya_stock_employees", JSON.stringify(liveList));
+            } catch {}
+            setCurrentUser((prev) => {
+              if (!prev) return null;
+              const updatedSelf = liveList.find((e) => e.id === prev.id);
+              if (!updatedSelf) return prev;
+              if (JSON.stringify(prev) !== JSON.stringify(updatedSelf)) {
+                return updatedSelf;
+              }
+              return prev;
+            });
+          }
+        }
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, "employees");
+      }
+    );
+
     // Periodic background sync
     const sheetsTimer = setInterval(() => {
       performSync(false, true);
@@ -207,6 +241,7 @@ export default function App() {
     window.addEventListener("focus", handleFocus);
 
     return () => {
+      unsubscribeEmps();
       clearInterval(sheetsTimer);
       clearInterval(empTimer);
       window.removeEventListener("focus", handleFocus);
@@ -593,6 +628,7 @@ export default function App() {
             availableLines={allUniqueLines}
             availableSuppliers={allUniqueSuppliers}
             onSaveEmployees={handleSaveEmployees}
+            onRefreshEmployees={syncEmployees}
           />
         )}
 

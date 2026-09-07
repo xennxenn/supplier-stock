@@ -12,6 +12,12 @@ import {
 } from "lucide-react";
 import type { Employee } from "../types";
 import { loginOnline, fetchEmployeesOnline } from "../api";
+import {
+  employeesCol,
+  onSnapshot,
+  handleFirestoreError,
+  OperationType,
+} from "../lib/firebase";
 
 interface LoginScreenProps {
   employees: Employee[];
@@ -57,13 +63,30 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     return 0;
   });
 
-  // Pre-fetch live employees on login screen mount so new machines get the latest list immediately
+  // Pre-fetch live employees on login screen mount and listen in real-time so new machines get the latest list immediately
   useEffect(() => {
     fetchEmployeesOnline().then((liveEmps) => {
       if (liveEmps && liveEmps.length > 0 && onSyncEmployees) {
         onSyncEmployees(liveEmps);
       }
     });
+
+    const unsubscribe = onSnapshot(
+      employeesCol,
+      (snapshot) => {
+        if (!snapshot.empty) {
+          const liveList = snapshot.docs.map((docSnap) => docSnap.data() as Employee);
+          if (liveList.length > 0 && onSyncEmployees) {
+            onSyncEmployees(liveList);
+          }
+        }
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, "employees");
+      }
+    );
+
+    return () => unsubscribe();
   }, [onSyncEmployees]);
 
   // Lockout countdown timer

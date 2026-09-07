@@ -13,6 +13,9 @@ import {
   AlertCircle,
   Layers,
   Sparkles,
+  RefreshCw,
+  Wifi,
+  CheckCircle2,
 } from "lucide-react";
 import type { Employee, PermissionKey } from "../types";
 import { PERMISSION_DEFINITIONS } from "../utils/permissionUtils";
@@ -23,6 +26,7 @@ interface EmployeesViewProps {
   availableLines?: string[];
   availableSuppliers?: string[];
   onSaveEmployees: (emps: Employee[]) => void;
+  onRefreshEmployees?: () => Promise<void> | void;
 }
 
 export const EmployeesView: React.FC<EmployeesViewProps> = ({
@@ -31,9 +35,11 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
   availableLines = [],
   availableSuppliers = [],
   onSaveEmployees,
+  onRefreshEmployees,
 }) => {
   const [editingEmp, setEditingEmp] = useState<Employee | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const defaultPerms = {
     view: true,
@@ -299,25 +305,52 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Header Banner */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      {/* Header Banner with Realtime Sync Status */}
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-            <Users className="w-5 h-5 text-amber-500" />
-            จัดการรายชื่อพนักงาน & สิทธิ์การเข้าใช้งาน
-          </h2>
-          <p className="text-xs text-slate-500 mt-1">
-            กำหนด Username, Password, สิทธิ์การเข้าถึงไลน์การผลิต และสิทธิ์การใช้งานในแต่ละเมนู/การรับ-เบิกจ่าย
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+              <Users className="w-5 h-5 text-amber-500" />
+              จัดการรายชื่อพนักงาน & สิทธิ์การเข้าใช้งาน
+            </h2>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              Realtime Sync (Firestore)
+            </span>
+          </div>
+          <p className="text-xs text-slate-500">
+            ฐานข้อมูลกลางเชื่อมต่อตรงกับ Cloud Firestore — แก้ไขหรือเพิ่มพนักงานจากเครื่องใด ทุกเครื่องจะอัปเดตตรงกันทันทีแบบ Real-time (รวม {employees.length} ท่าน)
           </p>
         </div>
 
-        <button
-          onClick={handleNew}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>เพิ่มพนักงานใหม่</span>
-        </button>
+        <div className="flex items-center gap-2 w-full md:w-auto">
+          {onRefreshEmployees && (
+            <button
+              onClick={async () => {
+                try {
+                  setIsRefreshing(true);
+                  await onRefreshEmployees();
+                } finally {
+                  setTimeout(() => setIsRefreshing(false), 500);
+                }
+              }}
+              disabled={isRefreshing}
+              title="ดึงข้อมูลล่าสุดจากเซิร์ฟเวอร์คลาวด์"
+              className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin text-amber-600" : ""}`} />
+              <span>{isRefreshing ? "กำลังซิงค์..." : "ซิงค์เดี๋ยวนี้"}</span>
+            </button>
+          )}
+
+          <button
+            onClick={handleNew}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            <span>เพิ่มพนักงานใหม่</span>
+          </button>
+        </div>
       </div>
 
       {/* Create / Edit Form Modal */}

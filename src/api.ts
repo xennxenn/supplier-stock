@@ -1,6 +1,15 @@
 import type { SheetsSyncData, Transaction, Employee, BackupEntry } from "./types";
 import Papa from "papaparse";
 import { parseFlexibleDate } from "./utils/exportUtils";
+import {
+  db,
+  employeesCol,
+  doc,
+  writeBatch,
+  getDocs,
+  OperationType,
+  handleFirestoreError,
+} from "./lib/firebase";
 
 const STOCK_SHEET_URL =
   "https://docs.google.com/spreadsheets/d/e/2PACX-1vS9Fm4Y7_BJZcpoolwOFQD6u0Exz4DdbKuFeV5oSjEsL9Pe_P560uyN0bSw522woUtA-JCbsCHJQ5eU/pub?gid=380033643&single=true&output=csv";
@@ -239,6 +248,20 @@ export async function loginOnline(username: string, password: string): Promise<{
 }
 
 export async function fetchEmployeesOnline(): Promise<Employee[] | null> {
+  // 1. Try reading from Firestore directly
+  try {
+    const snap = await getDocs(employeesCol);
+    if (!snap.empty) {
+      const list = snap.docs.map((d) => d.data() as Employee);
+      if (list.length > 0) {
+        return list;
+      }
+    }
+  } catch (firestoreErr) {
+    handleFirestoreError(firestoreErr, OperationType.LIST, "employees");
+  }
+
+  // 2. Fallback to server API
   try {
     const res = await fetch("/api/employees");
     if (res.ok) {
@@ -254,6 +277,32 @@ export async function fetchEmployeesOnline(): Promise<Employee[] | null> {
 }
 
 export async function saveEmployeesOnline(employees: Employee[]): Promise<boolean> {
+  let firestoreOk = false;
+  // 1. Write to Firestore directly for instant real-time sync across all devices
+  try {
+    const batch = writeBatch(db);
+    const snap = await getDocs(employeesCol);
+    const incomingIds = new Set(employees.map((e) => e.id));
+    
+    // Delete removed employees from Firestore
+    snap.docs.forEach((docSnap) => {
+      if (!incomingIds.has(docSnap.id)) {
+        batch.delete(docSnap.ref);
+      }
+    });
+
+    // Upsert all employees in Firestore
+    employees.forEach((emp) => {
+      batch.set(doc(db, "employees", emp.id), emp);
+    });
+
+    await batch.commit();
+    firestoreOk = true;
+  } catch (firestoreErr) {
+    handleFirestoreError(firestoreErr, OperationType.WRITE, "employees");
+  }
+
+  // 2. Also save to server API to keep server filesystem & in-memory store in sync
   try {
     const res = await fetch("/api/employees", {
       method: "POST",
@@ -262,12 +311,12 @@ export async function saveEmployeesOnline(employees: Employee[]): Promise<boolea
     });
     if (res.ok) {
       const data = await res.json();
-      return data.success === true;
+      return data.success === true || firestoreOk;
     }
   } catch (err) {
-    console.warn("Failed to save employees to server:", err);
+    console.warn("Failed to save employees to server API:", err);
   }
-  return false;
+  return firestoreOk;
 }
 
 export async function fetchBackupsOnline(): Promise<BackupEntry[] | null> {

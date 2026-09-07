@@ -1,5 +1,16 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, collection, doc, onSnapshot, setDoc, deleteDoc, getDocs, updateDoc, setLogLevel } from "firebase/firestore";
+import {
+  getFirestore,
+  collection,
+  doc,
+  onSnapshot,
+  setDoc,
+  deleteDoc,
+  getDocs,
+  updateDoc,
+  writeBatch,
+  setLogLevel,
+} from "firebase/firestore";
 
 // Suppress internal Firestore BloomFilter fallback warnings from cluttering console/logs
 if (typeof window !== "undefined") {
@@ -43,4 +54,28 @@ export const db = getFirestore(app, "ai-studio-supplieraccessor-a00a7d4e-7cb1-4b
 export const orderStatusCol = collection(db, "orderStatuses");
 export const employeesCol = collection(db, "employees");
 export const customTxCol = collection(db, "customTransactions");
+
+export enum OperationType {
+  CREATE = "create",
+  UPDATE = "update",
+  DELETE = "delete",
+  LIST = "list",
+  GET = "get",
+  WRITE = "write",
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: null,
+      email: null,
+    },
+    operationType,
+    path,
+  };
+  console.error("Firestore Error: ", JSON.stringify(errInfo));
+}
+
+export { doc, onSnapshot, setDoc, deleteDoc, getDocs, updateDoc, writeBatch };
 

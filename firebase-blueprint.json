@@ -1,0 +1,67 @@
+{
+  "entities": {
+    "Employee": {
+      "title": "Employee",
+      "description": "User profile, credentials, and permission settings for staff, managers, and administrators.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier for the employee" },
+        "name": { "type": "string", "description": "Full name of the employee" },
+        "username": { "type": "string", "description": "Login username" },
+        "password": { "type": "string", "description": "Login password" },
+        "pin": { "type": "string", "description": "Quick PIN code" },
+        "role": { "type": "string", "enum": ["admin", "manager", "staff"], "description": "Role level" },
+        "department": { "type": "string", "description": "Assigned department or production line" },
+        "employeeCode": { "type": "string", "description": "Official company employee code" },
+        "perms": { "type": "object", "description": "Fine-grained feature permissions" },
+        "allowedLines": { "type": "array", "description": "Allowed production lines" },
+        "allowedSuppliers": { "type": "array", "description": "Allowed suppliers" }
+      },
+      "required": ["id", "name", "role", "perms"]
+    },
+    "OrderStatus": {
+      "title": "OrderStatus",
+      "description": "Tracking procurement and order status for stock items across production lines.",
+      "type": "object",
+      "properties": {
+        "itemKey": { "type": "string", "description": "Unique identifier key of the stock item" },
+        "status": { "type": "string", "enum": ["none", "ordering", "ordered", "received"], "description": "Procurement status" },
+        "updatedAt": { "type": "string", "description": "Timestamp of last status update" },
+        "updatedBy": { "type": "string", "description": "Name of the employee who updated the status" },
+        "orderedQty": { "type": "number", "description": "Quantity ordered from supplier" },
+        "prPoNumber": { "type": "string", "description": "Purchase Request / Purchase Order number" },
+        "expectedDate": { "type": "string", "description": "Expected arrival date" },
+        "note": { "type": "string", "description": "Additional notes" }
+      },
+      "required": ["itemKey", "status"]
+    },
+    "CustomTransaction": {
+      "title": "CustomTransaction",
+      "description": "In-app recorded stock in/out transactions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique transaction ID" },
+        "timestamp": { "type": "string", "description": "Date and time of movement" },
+        "itemCode": { "type": "string", "description": "Stock item code" },
+        "itemName": { "type": "string", "description": "Stock item name" },
+        "type": { "type": "string", "enum": ["in", "out"], "description": "Transaction type" },
+        "qty": { "type": "number", "description": "Quantity moved" }
+      },
+      "required": ["id", "timestamp", "itemCode", "type", "qty"]
+    }
+  },
+  "firestore": {
+    "/employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/Employee" },
+      "description": "Synchronized employee profiles, credentials, and access permissions accessible across all devices."
+    },
+    "/orderStatuses/{itemKey}": {
+      "schema": { "$ref": "#/entities/OrderStatus" },
+      "description": "Real-time stock item procurement tracking and PR/PO status."
+    },
+    "/customTransactions/{txId}": {
+      "schema": { "$ref": "#/entities/CustomTransaction" },
+      "description": "Historical inventory receipts and dispatches recorded via the web application."
+    }
+  }
+}
