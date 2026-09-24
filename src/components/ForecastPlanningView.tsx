@@ -41,6 +41,7 @@ import {
 import type { StockItem, Transaction, ForecastItem, Employee, OrderStatus, PurchaseOrderItem } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
+import { matchesLineMulti, matchesExactOrTokenMulti } from "../utils/filterUtils";
 import { OrderLotManager } from "./OrderLotManager";
 import { MultiSelectFilter } from "./MultiSelectFilter";
 
@@ -368,30 +369,15 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
       }
 
       if (selectedLines.length > 0) {
-        const itLine = (f.item.line || "").trim().toLowerCase();
-        const matches = selectedLines.some((sl) => {
-          const s = sl.trim().toLowerCase();
-          return itLine === s || itLine.includes(s) || s.includes(itLine);
-        });
-        if (!matches) return false;
+        if (!matchesLineMulti(f.item.line, selectedLines)) return false;
       }
 
       if (selectedCategories.length > 0) {
-        const itCat = (f.item.category || "").trim().toLowerCase();
-        const matches = selectedCategories.some((sc) => {
-          const s = sc.trim().toLowerCase();
-          return itCat === s || itCat.includes(s) || s.includes(itCat);
-        });
-        if (!matches) return false;
+        if (!matchesExactOrTokenMulti(f.item.category, selectedCategories)) return false;
       }
 
       if (selectedSuppliers.length > 0) {
-        const itSup = (f.item.supplier || "").trim().toLowerCase();
-        const matches = selectedSuppliers.some((ss) => {
-          const s = ss.trim().toLowerCase();
-          return itSup === s || itSup.includes(s) || s.includes(itSup);
-        });
-        if (!matches) return false;
+        if (!matchesExactOrTokenMulti(f.item.supplier, selectedSuppliers)) return false;
       }
 
       if (selectedRisk !== "all" && f.riskLevel !== selectedRisk) return false;

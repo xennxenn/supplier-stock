@@ -24,6 +24,7 @@ import {
 import type { StockItem, Employee } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
+import { matchesLine, matchesExactOrToken } from "../utils/filterUtils";
 
 interface StockListViewProps {
   items: StockItem[];
@@ -86,28 +87,30 @@ export const StockListView: React.FC<StockListViewProps> = ({
     return items.filter((item) => {
       // Search with deferred value for 60fps responsive typing
       if (deferredSearch) {
-        const q = deferredSearch.toLowerCase();
+        const q = deferredSearch.toLowerCase().trim();
         const matchBarcode = item.barcode.toLowerCase().includes(q);
         const matchName = item.name.toLowerCase().includes(q);
         const matchSupplier = (item.supplier || "").toLowerCase().includes(q);
         const matchLocation = (item.location || "").toLowerCase().includes(q);
-        if (!matchBarcode && !matchName && !matchSupplier && !matchLocation) {
+        const matchLine = (item.line || "").toLowerCase().includes(q);
+        const matchCategory = (item.category || "").toLowerCase().includes(q);
+        if (!matchBarcode && !matchName && !matchSupplier && !matchLocation && !matchLine && !matchCategory) {
           return false;
         }
       }
 
       // Category
-      if (selectedCategory !== "all" && item.category !== selectedCategory) {
+      if (selectedCategory !== "all" && !matchesExactOrToken(item.category, selectedCategory)) {
         return false;
       }
 
       // Line
-      if (selectedLine !== "all" && item.line !== selectedLine) {
+      if (selectedLine !== "all" && !matchesLine(item.line, selectedLine)) {
         return false;
       }
 
       // Supplier
-      if (selectedSupplier !== "all" && item.supplier !== selectedSupplier) {
+      if (selectedSupplier !== "all" && !matchesExactOrToken(item.supplier, selectedSupplier)) {
         return false;
       }
 

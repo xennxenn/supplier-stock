@@ -1,4 +1,5 @@
 import type { Employee, PermissionKey, NavTab, StockItem, Transaction } from "../types";
+import { matchesLineMulti, matchesExactOrTokenMulti } from "./filterUtils";
 
 export const PERMISSION_DEFINITIONS: Array<{
   key: PermissionKey;
@@ -188,7 +189,7 @@ export function canAccessTab(
 }
 
 /**
- * Robust line matcher that handles trimming, partial containment, sub-departments
+ * Robust line matcher that handles trimming and multi-department tokens without leaking
  */
 export function isLineAllowed(
   line: string | undefined | null,
@@ -202,19 +203,7 @@ export function isLineAllowed(
     return false;
   }
 
-  const cleanLine = line.trim().toLowerCase();
-
-  return allowedLines.some((allowed) => {
-    const cleanAllowed = (allowed || "").trim().toLowerCase();
-    if (!cleanAllowed) return false;
-    if (cleanAllowed === "all") return true;
-
-    return (
-      cleanLine === cleanAllowed ||
-      cleanLine.includes(cleanAllowed) ||
-      cleanAllowed.includes(cleanLine)
-    );
-  });
+  return matchesLineMulti(line, allowedLines);
 }
 
 /**
@@ -231,19 +220,7 @@ export function isSupplierAllowed(
     return false;
   }
 
-  const cleanSup = supplier.trim().toLowerCase();
-
-  return allowedSuppliers.some((allowed) => {
-    const cleanAllowed = (allowed || "").trim().toLowerCase();
-    if (!cleanAllowed) return false;
-    if (cleanAllowed === "all") return true;
-
-    return (
-      cleanSup === cleanAllowed ||
-      cleanSup.includes(cleanAllowed) ||
-      cleanAllowed.includes(cleanSup)
-    );
-  });
+  return matchesExactOrTokenMulti(supplier, allowedSuppliers);
 }
 
 /**

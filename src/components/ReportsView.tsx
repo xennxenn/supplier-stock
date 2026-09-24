@@ -117,8 +117,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       map.set(l, cur);
     }
 
+    const itemMap = new Map<string, StockItem>(items.map((i) => [i.barcode.trim().toLowerCase(), i]));
     for (const t of transactions) {
-      const l = t.line || "ไม่ระบุ";
+      const it = itemMap.get(t.barcode.trim().toLowerCase());
+      const l = t.line?.trim() || it?.line?.trim() || "ไม่ระบุ";
       const cur = map.get(l) || {
         line: l,
         itemCount: 0,

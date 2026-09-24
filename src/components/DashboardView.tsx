@@ -28,6 +28,7 @@ import {
   Cell,
 } from "recharts";
 import type { StockItem, Transaction, SheetsSyncData, NavTab } from "../types";
+import { matchesLine, matchesExactOrToken } from "../utils/filterUtils";
 
 interface DashboardViewProps {
   data: SheetsSyncData | null;
@@ -68,33 +69,45 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const uniqueLines = useMemo(() => {
     const set = new Set<string>();
     for (const it of items) {
-      if (it.line) set.add(it.line);
+      if (!it.line) continue;
+      const raw = it.line.trim();
+      if (!raw || raw === "-") continue;
+      const parts = raw.split(/[,/;\+|\n]/).map((s) => s.trim()).filter(Boolean);
+      for (const p of parts) {
+        set.add(p);
+      }
     }
-    return Array.from(set).sort();
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
   }, [items]);
 
   const uniqueCategories = useMemo(() => {
     const set = new Set<string>();
     for (const it of items) {
-      if (it.category) set.add(it.category);
+      if (it.category) {
+        const cat = it.category.trim();
+        if (cat && cat !== "-") set.add(cat);
+      }
     }
-    return Array.from(set).sort();
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
   }, [items]);
 
   const uniqueSuppliers = useMemo(() => {
     const set = new Set<string>();
     for (const it of items) {
-      if (it.supplier) set.add(it.supplier);
+      if (it.supplier) {
+        const sup = it.supplier.trim();
+        if (sup && sup !== "-") set.add(sup);
+      }
     }
-    return Array.from(set).sort();
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
   }, [items]);
 
   // Filtered Stock Items based on active filters
   const filteredItems = useMemo(() => {
     return items.filter((it) => {
-      if (selectedLine !== "all" && it.line !== selectedLine) return false;
-      if (selectedCategory !== "all" && it.category !== selectedCategory) return false;
-      if (selectedSupplier !== "all" && it.supplier !== selectedSupplier) return false;
+      if (selectedLine !== "all" && !matchesLine(it.line, selectedLine)) return false;
+      if (selectedCategory !== "all" && !matchesExactOrToken(it.category, selectedCategory)) return false;
+      if (selectedSupplier !== "all" && !matchesExactOrToken(it.supplier, selectedSupplier)) return false;
       return true;
     });
   }, [items, selectedLine, selectedCategory, selectedSupplier]);
@@ -104,16 +117,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return new Set(filteredItems.map((i) => i.barcode.trim().toLowerCase()));
   }, [filteredItems]);
 
+  const itemLineMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const it of items) {
+      if (it.line) map.set(it.barcode.trim().toLowerCase(), it.line);
+    }
+    return map;
+  }, [items]);
+
   // Filtered Transactions corresponding to active filter
   const filteredTransactions = useMemo(() => {
     return transactions.filter((t) => {
-      if (selectedLine !== "all" && t.line !== selectedLine) return false;
+      const b = t.barcode.trim().toLowerCase();
+      const effectiveLine = t.line?.trim() || itemLineMap.get(b) || "";
+      if (selectedLine !== "all" && !matchesLine(effectiveLine, selectedLine)) return false;
       if (selectedCategory !== "all" || selectedSupplier !== "all") {
-        if (!itemBarcodeSet.has(t.barcode.trim().toLowerCase())) return false;
+        if (!itemBarcodeSet.has(b)) return false;
       }
       return true;
     });
-  }, [transactions, selectedLine, selectedCategory, selectedSupplier, itemBarcodeSet]);
+  }, [transactions, selectedLine, selectedCategory, selectedSupplier, itemBarcodeSet, itemLineMap]);
 
   const isFiltered = selectedLine !== "all" || selectedCategory !== "all" || selectedSupplier !== "all";
 

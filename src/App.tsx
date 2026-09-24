@@ -41,6 +41,7 @@ import {
   getScopedTransactions,
   canAccessTab,
   hasPermission,
+  isLineAllowed,
 } from "./utils/permissionUtils";
 import { RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
 
@@ -405,14 +406,30 @@ export default function App() {
   };
 
   // Global All Lines & Suppliers (for employee editing configuration)
-  const allUniqueLines = useMemo(
-    () => Array.from(new Set(items.map((i) => i.line).filter(Boolean))).sort(),
-    [items]
-  );
-  const allUniqueSuppliers = useMemo(
-    () => Array.from(new Set(items.map((i) => i.supplier).filter(Boolean))).sort(),
-    [items]
-  );
+  const allUniqueLines = useMemo(() => {
+    const set = new Set<string>();
+    for (const i of items) {
+      if (!i.line) continue;
+      const raw = i.line.trim();
+      if (!raw || raw === "-") continue;
+      const tokens = raw.split(/[,/;\+|\n]/).map((t) => t.trim()).filter(Boolean);
+      for (const t of tokens) {
+        set.add(t);
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
+  }, [items]);
+
+  const allUniqueSuppliers = useMemo(() => {
+    const set = new Set<string>();
+    for (const i of items) {
+      if (!i.supplier) continue;
+      const raw = i.supplier.trim();
+      if (!raw || raw === "-") continue;
+      set.add(raw);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
+  }, [items]);
 
   // Scoped Stock Items based on currentUser line and supplier permissions
   const scopedItems = useMemo(() => {
@@ -435,14 +452,19 @@ export default function App() {
     ) {
       return allUniqueLines;
     }
-    return allUniqueLines.filter((l) => currentUser.allowedLines!.includes(l));
+    return allUniqueLines.filter((l) => isLineAllowed(l, currentUser.allowedLines));
   }, [allUniqueLines, currentUser]);
 
   // Scoped unique categories
   const uniqueCategories = useMemo(() => {
-    return Array.from(
-      new Set(scopedItems.map((i) => i.category).filter(Boolean))
-    ).sort();
+    const set = new Set<string>();
+    for (const i of scopedItems) {
+      if (!i.category) continue;
+      const raw = i.category.trim();
+      if (!raw || raw === "-") continue;
+      set.add(raw);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
   }, [scopedItems]);
 
   const lowStockCount = scopedItems.filter(

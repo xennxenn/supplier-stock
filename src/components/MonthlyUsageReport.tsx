@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import type { StockItem, Transaction } from "../types";
 import { exportToCSV } from "../utils/exportUtils";
+import { matchesLine, matchesExactOrToken } from "../utils/filterUtils";
 
 interface MonthlyUsageReportProps {
   items: StockItem[];
@@ -122,6 +123,10 @@ export const MonthlyUsageReport: React.FC<MonthlyUsageReportProps> = ({
       totals[key] = { label: meta.label, outQty: 0, cost: 0 };
     });
 
+    const itemMapByBarcode = new Map<string, StockItem>(
+      items.map((it) => [it.barcode.trim().toLowerCase(), it])
+    );
+
     // Item-level map: barcode -> { [monthKey]: qtyOut, totalOut, avgMonthly }
     const itemMap = new Map<
       string,
@@ -135,12 +140,22 @@ export const MonthlyUsageReport: React.FC<MonthlyUsageReportProps> = ({
     transactions.forEach((t) => {
       if (t.qtyOut > 0 && t.year && t.month) {
         const key = `${t.year}-${String(t.month).padStart(2, "0")}`;
-        if (totals[key]) {
+        const b = t.barcode.trim().toLowerCase();
+        const it = itemMapByBarcode.get(b);
+        const effectiveLine = t.line?.trim() || it?.line?.trim() || "";
+        const effectiveCat = it?.category?.trim() || "";
+        const effectiveSup = it?.supplier?.trim() || "";
+
+        const matchesCurrentFilter =
+          (selectedLine === "all" || matchesLine(effectiveLine, selectedLine)) &&
+          (selectedCategory === "all" || matchesExactOrToken(effectiveCat, selectedCategory)) &&
+          (selectedSupplier === "all" || matchesExactOrToken(effectiveSup, selectedSupplier));
+
+        if (matchesCurrentFilter && totals[key]) {
           totals[key].outQty += t.qtyOut;
           totals[key].cost += t.totalCost || t.qtyOut * (t.unitPrice || 0);
         }
 
-        const b = t.barcode.trim().toLowerCase();
         if (!itemMap.has(b)) {
           itemMap.set(b, {
             monthly: {},
@@ -168,23 +183,24 @@ export const MonthlyUsageReport: React.FC<MonthlyUsageReportProps> = ({
       })),
       itemUsageMap: itemMap,
     };
-  }, [transactions, monthKeyList]);
+  }, [transactions, monthKeyList, items, selectedLine, selectedCategory, selectedSupplier]);
 
   // Filtered stock items to display in the table
   const tableRows = useMemo(() => {
     return items
       .filter((it) => {
-        if (selectedLine !== "all" && it.line !== selectedLine) return false;
-        if (selectedCategory !== "all" && it.category !== selectedCategory) return false;
-        if (selectedSupplier !== "all" && it.supplier !== selectedSupplier) return false;
+        if (selectedLine !== "all" && !matchesLine(it.line, selectedLine)) return false;
+        if (selectedCategory !== "all" && !matchesExactOrToken(it.category, selectedCategory)) return false;
+        if (selectedSupplier !== "all" && !matchesExactOrToken(it.supplier, selectedSupplier)) return false;
 
         if (deferredSearch.trim()) {
-          const q = deferredSearch.toLowerCase();
+          const q = deferredSearch.toLowerCase().trim();
           const matchName = it.name.toLowerCase().includes(q);
           const matchCode = it.barcode.toLowerCase().includes(q);
           const matchSup = (it.supplier || "").toLowerCase().includes(q);
           const matchLine = (it.line || "").toLowerCase().includes(q);
-          if (!matchName && !matchCode && !matchSup && !matchLine) return false;
+          const matchCategory = (it.category || "").toLowerCase().includes(q);
+          if (!matchName && !matchCode && !matchSup && !matchLine && !matchCategory) return false;
         }
 
         const b = it.barcode.trim().toLowerCase();

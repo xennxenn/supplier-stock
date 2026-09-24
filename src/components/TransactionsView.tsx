@@ -21,6 +21,7 @@ import {
 import type { Transaction, StockItem, Employee } from "../types";
 import { exportToExcel, exportToCSV, parseFlexibleDate } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
+import { matchesLine, matchesExactOrToken } from "../utils/filterUtils";
 
 interface TransactionsViewProps {
   transactions: Transaction[];
@@ -76,6 +77,15 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
       if (item.supplier) {
         map.set(item.barcode.trim().toLowerCase(), item.supplier);
       }
+    }
+    return map;
+  }, [stockItems]);
+
+  // Map barcodes to Item Line (fallback for transactions with missing line stamp)
+  const barcodeLineMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of stockItems) {
+      if (item.line) map.set(item.barcode.trim().toLowerCase(), item.line);
     }
     return map;
   }, [stockItems]);
@@ -144,17 +154,21 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
   // Filter transactions
   const filtered = useMemo(() => {
     return transactions.filter((t) => {
+      const cleanBarcode = t.barcode.trim().toLowerCase();
+      const supp = barcodeSupplierMap.get(cleanBarcode) || "";
+      const effectiveLine = t.line?.trim() || barcodeLineMap.get(cleanBarcode) || "";
+
       if (deferredSearch) {
-        const q = deferredSearch.toLowerCase();
+        const q = deferredSearch.toLowerCase().trim();
         const matchBarcode = t.barcode.toLowerCase().includes(q);
         const matchName = t.itemName.toLowerCase().includes(q);
         const matchEmpName = (t.employeeName || "").toLowerCase().includes(q);
         const matchEmpId = (t.employeeId || "").toLowerCase().includes(q);
         const matchDate = (t.date || "").toLowerCase().includes(q);
-        const supp = barcodeSupplierMap.get(t.barcode.trim().toLowerCase()) || "";
         const matchSupplier = supp.toLowerCase().includes(q);
+        const matchLine = effectiveLine.toLowerCase().includes(q);
 
-        if (!matchBarcode && !matchName && !matchEmpName && !matchEmpId && !matchDate && !matchSupplier) {
+        if (!matchBarcode && !matchName && !matchEmpName && !matchEmpId && !matchDate && !matchSupplier && !matchLine) {
           return false;
         }
       }
@@ -162,11 +176,12 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
       if (selectedType === "in" && t.qtyIn <= 0) return false;
       if (selectedType === "out" && t.qtyOut <= 0) return false;
 
-      if (selectedLine !== "all" && t.line !== selectedLine) return false;
+      if (selectedLine !== "all" && !matchesLine(effectiveLine, selectedLine)) {
+        return false;
+      }
 
-      if (selectedSupplier !== "all") {
-        const itemSupplier = barcodeSupplierMap.get(t.barcode.trim().toLowerCase());
-        if (itemSupplier !== selectedSupplier) return false;
+      if (selectedSupplier !== "all" && !matchesExactOrToken(supp, selectedSupplier)) {
+        return false;
       }
 
       if (selectedStatus !== "all" && t.status !== selectedStatus) return false;
@@ -189,6 +204,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
     selectedMonth,
     selectedYear,
     barcodeSupplierMap,
+    barcodeLineMap,
   ]);
 
   // Sort transactions with robust handlers
