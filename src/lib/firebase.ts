@@ -54,6 +54,8 @@ export const db = getFirestore(app, "ai-studio-supplieraccessor-a00a7d4e-7cb1-4b
 export const orderStatusCol = collection(db, "orderStatuses");
 export const employeesCol = collection(db, "employees");
 export const customTxCol = collection(db, "customTransactions");
+export const purchaseOrdersCol = collection(db, "purchaseOrders");
+export const appSettingsCol = collection(db, "appSettings");
 
 export enum OperationType {
   CREATE = "create",

@@ -275,7 +275,7 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {itemTxs.slice(0, 15).map((tx, idx) => (
-                      <tr key={tx.id || idx} className="hover:bg-slate-50">
+                      <tr key={`${tx.id || "tx"}_${idx}`} className="hover:bg-slate-50">
                         <td className="p-2.5 text-slate-600">{tx.date}</td>
                         <td className="p-2.5">
                           {tx.qtyIn > 0 ? (

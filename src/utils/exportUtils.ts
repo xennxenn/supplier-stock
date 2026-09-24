@@ -91,103 +91,115 @@ function getMonthFromPart(part: string): number {
   return NaN;
 }
 
+const dateParseCache = new Map<string, number>();
+
 /**
  * Robust date parser supporting Thai Buddhist calendar, ISO, DD/MM/YYYY, Thai month names, and Excel serial numbers
  */
 export function parseFlexibleDate(dateStr?: string, fallbackYear?: number, fallbackMonth?: number): number {
-  if (!dateStr || dateStr.trim() === "") {
+  const cacheKey = `${dateStr || ""}_${fallbackYear || ""}_${fallbackMonth || ""}`;
+  const cached = dateParseCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const compute = (): number => {
+    if (!dateStr || dateStr.trim() === "") {
+      if (fallbackYear && fallbackMonth) {
+        const y = fallbackYear > 2500 ? fallbackYear - 543 : fallbackYear;
+        return new Date(y, fallbackMonth - 1, 1).getTime();
+      }
+      return 0;
+    }
+
+    const str = dateStr.trim();
+
+    // Excel serial number (e.g., "45424" or 45424)
+    if (/^\d{5}(\.\d+)?$/.test(str)) {
+      const serial = parseFloat(str);
+      const utcDays = Math.floor(serial - 25569);
+      const utcValue = utcDays * 86400;
+      const dateInfo = new Date(utcValue * 1000);
+      return dateInfo.getTime();
+    }
+
+    // DD/MM/YYYY or D/M/YYYY or DD/MM/YY or DD/MM/YYYY HH:mm:ss
+    if (str.includes("/")) {
+      const [datePart, timePart] = str.split(" ");
+      const parts = datePart.split("/");
+      if (parts.length === 3) {
+        const d = parseInt(parts[0], 10);
+        const m = getMonthFromPart(parts[1]);
+        let y = parseInt(parts[2], 10);
+
+        // Handle 2-digit years
+        if (y < 100) {
+          // If year is 50-99, it's likely Thai year 2550-2599
+          y += y >= 50 ? 2500 : 2000;
+        }
+        // Handle Thai Buddhist year (e.g., 2567 -> 2024)
+        if (y > 2500) {
+          y -= 543;
+        }
+
+        let hour = 0, min = 0, sec = 0;
+        if (timePart) {
+          const timeParts = timePart.split(":");
+          if (timeParts.length >= 2) {
+            hour = parseInt(timeParts[0], 10) || 0;
+            min = parseInt(timeParts[1], 10) || 0;
+            sec = parseInt(timeParts[2] || "0", 10) || 0;
+          }
+        }
+
+        const dateObj = new Date(y, m, d, hour, min, sec);
+        if (!isNaN(dateObj.getTime())) {
+          return dateObj.getTime();
+        }
+      }
+    }
+
+    // YYYY-MM-DD or DD-MM-YYYY or DD-MMM-YYYY (e.g. 2-ก.ย.-2026)
+    if (str.includes("-")) {
+      const parts = str.split("-");
+      if (parts.length === 3) {
+        if (parts[0].length === 4) {
+          // YYYY-MM-DD
+          let y = parseInt(parts[0], 10);
+          if (y > 2500) y -= 543;
+          const m = getMonthFromPart(parts[1]);
+          const d = parseInt(parts[2], 10);
+          const dateObj = new Date(y, m, d);
+          if (!isNaN(dateObj.getTime())) return dateObj.getTime();
+        } else {
+          // DD-MM-YYYY or DD-MMM-YYYY
+          const d = parseInt(parts[0], 10);
+          const m = getMonthFromPart(parts[1]);
+          let y = parseInt(parts[2], 10);
+          
+          if (y < 100) {
+            y += y >= 50 ? 2500 : 2000;
+          }
+          if (y > 2500) y -= 543;
+          
+          const dateObj = new Date(y, m, d);
+          if (!isNaN(dateObj.getTime())) return dateObj.getTime();
+        }
+      }
+    }
+
+    // Standard JS parse
+    const parsed = Date.parse(str);
+    if (!isNaN(parsed)) return parsed;
+
+    // Fallback to year/month if provided
     if (fallbackYear && fallbackMonth) {
       const y = fallbackYear > 2500 ? fallbackYear - 543 : fallbackYear;
       return new Date(y, fallbackMonth - 1, 1).getTime();
     }
+
     return 0;
-  }
+  };
 
-  const str = dateStr.trim();
-
-  // Excel serial number (e.g., "45424" or 45424)
-  if (/^\d{5}(\.\d+)?$/.test(str)) {
-    const serial = parseFloat(str);
-    const utcDays = Math.floor(serial - 25569);
-    const utcValue = utcDays * 86400;
-    const dateInfo = new Date(utcValue * 1000);
-    return dateInfo.getTime();
-  }
-
-  // DD/MM/YYYY or D/M/YYYY or DD/MM/YY or DD/MM/YYYY HH:mm:ss
-  if (str.includes("/")) {
-    const [datePart, timePart] = str.split(" ");
-    const parts = datePart.split("/");
-    if (parts.length === 3) {
-      const d = parseInt(parts[0], 10);
-      const m = getMonthFromPart(parts[1]);
-      let y = parseInt(parts[2], 10);
-
-      // Handle 2-digit years
-      if (y < 100) {
-        // If year is 50-99, it's likely Thai year 2550-2599
-        y += y >= 50 ? 2500 : 2000;
-      }
-      // Handle Thai Buddhist year (e.g., 2567 -> 2024)
-      if (y > 2500) {
-        y -= 543;
-      }
-
-      let hour = 0, min = 0, sec = 0;
-      if (timePart) {
-        const timeParts = timePart.split(":");
-        if (timeParts.length >= 2) {
-          hour = parseInt(timeParts[0], 10) || 0;
-          min = parseInt(timeParts[1], 10) || 0;
-          sec = parseInt(timeParts[2] || "0", 10) || 0;
-        }
-      }
-
-      const dateObj = new Date(y, m, d, hour, min, sec);
-      if (!isNaN(dateObj.getTime())) {
-        return dateObj.getTime();
-      }
-    }
-  }
-
-  // YYYY-MM-DD or DD-MM-YYYY or DD-MMM-YYYY (e.g. 2-ก.ย.-2026)
-  if (str.includes("-")) {
-    const parts = str.split("-");
-    if (parts.length === 3) {
-      if (parts[0].length === 4) {
-        // YYYY-MM-DD
-        let y = parseInt(parts[0], 10);
-        if (y > 2500) y -= 543;
-        const m = getMonthFromPart(parts[1]);
-        const d = parseInt(parts[2], 10);
-        const dateObj = new Date(y, m, d);
-        if (!isNaN(dateObj.getTime())) return dateObj.getTime();
-      } else {
-        // DD-MM-YYYY or DD-MMM-YYYY
-        const d = parseInt(parts[0], 10);
-        const m = getMonthFromPart(parts[1]);
-        let y = parseInt(parts[2], 10);
-        
-        if (y < 100) {
-          y += y >= 50 ? 2500 : 2000;
-        }
-        if (y > 2500) y -= 543;
-        
-        const dateObj = new Date(y, m, d);
-        if (!isNaN(dateObj.getTime())) return dateObj.getTime();
-      }
-    }
-  }
-
-  // Standard JS parse
-  const parsed = Date.parse(str);
-  if (!isNaN(parsed)) return parsed;
-
-  // Fallback to year/month if provided
-  if (fallbackYear && fallbackMonth) {
-    const y = fallbackYear > 2500 ? fallbackYear - 543 : fallbackYear;
-    return new Date(y, fallbackMonth - 1, 1).getTime();
-  }
-
-  return 0;
+  const result = compute();
+  dateParseCache.set(cacheKey, result);
+  return result;
 }

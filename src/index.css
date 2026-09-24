@@ -1,1 +1,131 @@
 @import "tailwindcss";
+
+:root {
+  --liquid-accent: #0284c7;
+  --liquid-accent-hover: #0369a1;
+  --liquid-accent-light: rgba(14, 165, 233, 0.12);
+  --liquid-accent-ring: rgba(14, 165, 233, 0.35);
+  --liquid-glow: rgba(2, 132, 199, 0.25);
+}
+
+/* iOS 27 Liquid Glassmorphism Core Classes */
+.liquid-glass {
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(24px) saturate(190%);
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.05),
+              0 1px 3px 0 rgba(0, 0, 0, 0.02),
+              inset 0 1px 1px 0 rgba(255, 255, 255, 0.85);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dark .liquid-glass {
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 35px -10px rgba(0, 0, 0, 0.4),
+              inset 0 1px 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.liquid-glass-card {
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.04),
+              0 1px 2px rgba(0, 0, 0, 0.02),
+              inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dark .liquid-glass-card {
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3),
+              inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.liquid-glass-input {
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(203, 213, 225, 0.6);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.liquid-glass-input:focus {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: var(--liquid-accent);
+  box-shadow: 0 0 0 3px var(--liquid-accent-ring);
+  outline: none;
+}
+
+.dark .liquid-glass-input {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #f1f5f9;
+}
+
+.dark .liquid-glass-input:focus {
+  background: rgba(15, 23, 42, 0.9);
+}
+
+/* Ambient Floating Glow Keyframe */
+@keyframes ambientLiquidFloat {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translate(25px, -15px) scale(1.08);
+    opacity: 0.65;
+  }
+}
+
+.animate-liquid-orb {
+  animation: ambientLiquidFloat 14s ease-in-out infinite;
+}
+
+.animate-liquid-orb-delayed {
+  animation: ambientLiquidFloat 18s ease-in-out 3s infinite reverse;
+}
+
+/* Print Styles for Purchase Orders */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 11pt !important;
+  }
+
+  /* Hide navigation, buttons, toast, floating controls during print */
+  nav,
+  header,
+  footer,
+  .no-print,
+  button:not(.allow-print),
+  .print\\:hidden {
+    display: none !important;
+  }
+
+  .print\\:block {
+    display: block !important;
+  }
+
+  .print\\:w-full {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .print\\:shadow-none {
+    box-shadow: none !important;
+    border: 1px solid #e2e8f0 !important;
+  }
+
+  .print\\:break-inside-avoid {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+}

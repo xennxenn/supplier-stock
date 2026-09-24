@@ -18,6 +18,7 @@ import {
   handleFirestoreError,
   OperationType,
 } from "../lib/firebase";
+import { useTheme } from "../context/ThemeContext";
 
 interface LoginScreenProps {
   employees: Employee[];
@@ -247,17 +248,26 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   };
 
   const isLocked = lockoutRemaining > 0;
+  const { theme } = useTheme();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50/60 via-slate-50 to-slate-100 flex items-center justify-center p-4 selection:bg-amber-100 selection:text-amber-900">
       <div className="bg-white border border-slate-200/90 rounded-3xl p-8 sm:p-10 max-w-md w-full shadow-xl shadow-slate-200/60 space-y-6">
         {/* Brand Header */}
         <div className="text-center space-y-2">
-          <div className="w-14 h-14 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center mx-auto shadow-md shadow-amber-500/20 font-black text-2xl tracking-wider">
-            A
-          </div>
+          {theme.logoUrl ? (
+            <img
+              src={theme.logoUrl}
+              alt="Brand Logo"
+              className="w-16 h-16 object-contain rounded-2xl mx-auto border border-slate-200 p-1 bg-white shadow-md shadow-slate-200/50"
+            />
+          ) : (
+            <div className="w-14 h-14 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center mx-auto shadow-md shadow-amber-500/20 font-black text-2xl tracking-wider">
+              A
+            </div>
+          )}
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-            Accessories Stock
+            {theme.logoText || "Accessories Stock"}
           </h1>
           <p className="text-xs text-slate-500">
             ระบบจัดการสต็อก & รายการเบิกจ่ายสินค้า (Google Sheets Sync)

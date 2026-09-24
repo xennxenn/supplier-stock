@@ -9,6 +9,9 @@ import { ForecastPlanningView } from "./components/ForecastPlanningView";
 import { ReportsView } from "./components/ReportsView";
 import { EmployeesView } from "./components/EmployeesView";
 import { BackupExportView } from "./components/BackupExportView";
+import { PurchaseOrdersView } from "./components/PurchaseOrdersView";
+import { ThemeSettingsView } from "./components/ThemeSettingsView";
+import { MonthlyUsageReport } from "./components/MonthlyUsageReport";
 import { ItemDetailModal } from "./components/ItemDetailModal";
 import { LoginScreen } from "./components/LoginScreen";
 import {
@@ -30,6 +33,7 @@ import type {
   SheetsSyncData,
   BackupEntry,
   NavTab,
+  PurchaseOrderItem,
 } from "./types";
 import { INITIAL_EMPLOYEES } from "./data/defaultEmployees";
 import {
@@ -96,6 +100,27 @@ export default function App() {
     item: StockItem;
     type: "in" | "out";
   } | null>(null);
+
+  // Purchase Order cross-tab creation payload
+  const [initialNewOrder, setInitialNewOrder] = useState<{
+    items: PurchaseOrderItem[];
+    filterSummary?: string;
+    bufferPercent?: number;
+  } | null>(null);
+
+  const handleCreatePurchaseOrder = (
+    orderItems: PurchaseOrderItem[],
+    filterSummary: string,
+    bufferPercent: number
+  ) => {
+    setInitialNewOrder({
+      items: orderItems,
+      filterSummary,
+      bufferPercent,
+    });
+    setActiveTab("purchaseOrders");
+    showToast(`ดึงรายการที่กรอง ${orderItems.length} รายการ ไปยังใบสั่งซื้อเรียบร้อย`);
+  };
 
   // Toast notification
   const [toast, setToast] = useState<{
@@ -464,7 +489,14 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50/70 text-slate-900 font-sans flex flex-col selection:bg-amber-100 selection:text-amber-900">
+    <div className="min-h-screen bg-slate-50/70 text-slate-900 font-sans flex flex-col selection:bg-sky-100 selection:text-sky-900 relative overflow-x-hidden">
+      {/* Background Liquid Glass Ambient Lights */}
+      <div className="fixed inset-0 pointer-events-none -z-10 overflow-hidden">
+        <div className="absolute -top-32 -left-32 w-96 h-96 rounded-full bg-sky-400/10 blur-3xl animate-pulse" />
+        <div className="absolute top-1/3 -right-32 w-96 h-96 rounded-full bg-indigo-400/10 blur-3xl" />
+        <div className="absolute -bottom-32 left-1/3 w-96 h-96 rounded-full bg-amber-400/10 blur-3xl" />
+      </div>
+
       {/* Toast Notification */}
       {toast && (
         <div className="fixed bottom-5 right-5 z-50 animate-in slide-in-from-bottom-5 fade-in">
@@ -500,7 +532,7 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main className="flex-1 w-full max-w-[1920px] mx-auto px-3 sm:px-6 lg:px-8 py-5">
         {/* Access scope indicator banner for restricted users */}
         {currentUser.role !== "admin" &&
           ((currentUser.allowedLines && currentUser.allowedLines.length > 0) ||
@@ -575,6 +607,7 @@ export default function App() {
             lines={uniqueLines}
             stockItems={scopedItems}
             currentUser={currentUser}
+            onSelectItem={(item) => setSelectedDetailItem(item)}
           />
         )}
 
@@ -597,6 +630,8 @@ export default function App() {
             currentUser={currentUser}
             onSelectItem={(item) => setSelectedDetailItem(item)}
             onQuickMove={handleQuickMove}
+            onCreatePurchaseOrder={handleCreatePurchaseOrder}
+            onNavigateToMonthly={() => setActiveTab("monthlyUsage")}
           />
         )}
 
@@ -609,7 +644,31 @@ export default function App() {
             currentUser={currentUser}
             onSelectItem={(item) => setSelectedDetailItem(item)}
             onQuickMove={handleQuickMove}
+            onCreatePurchaseOrder={handleCreatePurchaseOrder}
           />
+        )}
+
+        {activeTab === "purchaseOrders" && (
+          <PurchaseOrdersView
+            currentUser={currentUser}
+            items={scopedItems}
+            transactions={scopedTransactions}
+            initialNewOrder={initialNewOrder}
+            onClearInitialNewOrder={() => setInitialNewOrder(null)}
+            onRefreshStock={() => performSync(true, true)}
+          />
+        )}
+
+        {activeTab === "monthlyUsage" && (
+          <div className="space-y-6 animate-in fade-in duration-200">
+            <MonthlyUsageReport
+              items={scopedItems}
+              transactions={scopedTransactions}
+              lines={uniqueLines}
+              categories={uniqueCategories}
+              onSelectItem={(item) => setSelectedDetailItem(item)}
+            />
+          </div>
         )}
 
         {activeTab === "reports" && (
@@ -641,6 +700,10 @@ export default function App() {
             onSync={() => performSync(true)}
             onRestoreBackup={handleRestoreBackup}
           />
+        )}
+
+        {activeTab === "settings" && (
+          <ThemeSettingsView currentUser={currentUser} />
         )}
       </main>
 

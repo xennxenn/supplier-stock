@@ -626,7 +626,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="divide-y divide-slate-100">
             {topIssuedItems.slice(0, 5).map((it, idx) => (
               <div
-                key={it.barcode}
+                key={`${it.barcode || "item"}_${idx}`}
                 className="py-3 flex items-center justify-between gap-3 hover:bg-slate-50 px-2 rounded-xl transition"
               >
                 <div className="flex items-center gap-3 min-w-0">

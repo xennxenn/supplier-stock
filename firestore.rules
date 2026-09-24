@@ -11,8 +11,8 @@ service cloud.firestore {
     }
 
     function isValidOrderStatus(data) {
-      return data.itemKey is string
-        && data.status in ['none', 'ordering', 'ordered', 'received'];
+      return (data.barcode is string || data.itemKey is string)
+        && (data.status is string || data.isOrdered is bool);
     }
 
     function isValidCustomTx(data) {
@@ -20,6 +20,21 @@ service cloud.firestore {
         && data.itemCode is string
         && data.type in ['in', 'out']
         && data.qty is number;
+    }
+
+    function isValidPurchaseOrder(data) {
+      return data.id is string
+        && data.poNumber is string
+        && data.status in ['new', 'approved', 'confirm', 'received', 'cancelled']
+        && data.items is list;
+    }
+
+    function isValidAppTheme(data) {
+      return data.id is string;
+    }
+
+    function isValidBackup(data) {
+      return data.id is string;
     }
 
     match /employees/{employeeId} {
@@ -37,6 +52,24 @@ service cloud.firestore {
     match /customTransactions/{txId} {
       allow read: if true;
       allow create, update: if isValidCustomTx(request.resource.data);
+      allow delete: if true;
+    }
+
+    match /purchaseOrders/{orderId} {
+      allow read: if true;
+      allow create, update: if isValidPurchaseOrder(request.resource.data);
+      allow delete: if true;
+    }
+
+    match /appSettings/{settingId} {
+      allow read: if true;
+      allow create, update: if isValidAppTheme(request.resource.data);
+      allow delete: if true;
+    }
+
+    match /backups/{backupId} {
+      allow read: if true;
+      allow create, update: if isValidBackup(request.resource.data);
       allow delete: if true;
     }
   }

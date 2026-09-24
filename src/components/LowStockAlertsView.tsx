@@ -17,11 +17,13 @@ import {
   FileSpreadsheet,
   Coins,
   Boxes,
+  Calendar,
 } from "lucide-react";
-import type { StockItem, Employee, OrderStatus, Transaction } from "../types";
+import type { StockItem, Employee, OrderStatus, Transaction, PurchaseOrderItem } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
 import { OrderLotManager } from "./OrderLotManager";
+import { MultiSelectFilter } from "./MultiSelectFilter";
 
 interface LowStockAlertsViewProps {
   items: StockItem[];
@@ -30,6 +32,12 @@ interface LowStockAlertsViewProps {
   currentUser?: Employee;
   onSelectItem: (item: StockItem) => void;
   onQuickMove: (item: StockItem, type: "in" | "out") => void;
+  onCreatePurchaseOrder?: (
+    items: PurchaseOrderItem[],
+    filterSummary: string,
+    bufferPercent: number
+  ) => void;
+  onNavigateToMonthly?: () => void;
 }
 
 type LowStockSortField =
@@ -51,15 +59,17 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
   currentUser,
   onSelectItem,
   onQuickMove,
+  onCreatePurchaseOrder,
+  onNavigateToMonthly,
 }) => {
   const canReceive = hasPermission(currentUser, "receive");
   const canExport = hasPermission(currentUser, "importExport");
   const canManageOrderStatus = hasPermission(currentUser, "manageOrderStatus");
 
   const [search, setSearch] = useState("");
-  const [selectedLine, setSelectedLine] = useState("all");
-  const [selectedCategory, setSelectedCategory] = useState("all");
-  const [selectedSupplier, setSelectedSupplier] = useState("all");
+  const [selectedLines, setSelectedLines] = useState<string[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
   const [safetyBufferPercent, setSafetyBufferPercent] = useState<number>(30); // 30% buffer over min stock
   const [sortField, setSortField] = useState<LowStockSortField>("estimatedCost");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
@@ -282,7 +292,7 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
   const filtered = useMemo(() => {
     return lowStockItems.filter((it) => {
       if (search) {
-        const q = search.toLowerCase();
+        const q = search.toLowerCase().trim();
         if (
           !it.barcode.toLowerCase().includes(q) &&
           !it.name.toLowerCase().includes(q) &&
@@ -293,9 +303,33 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
         }
       }
 
-      if (selectedLine !== "all" && it.line !== selectedLine) return false;
-      if (selectedCategory !== "all" && it.category !== selectedCategory) return false;
-      if (selectedSupplier !== "all" && it.supplier !== selectedSupplier) return false;
+      if (selectedLines.length > 0) {
+        const itLine = (it.line || "").trim().toLowerCase();
+        const matches = selectedLines.some((sl) => {
+          const s = sl.trim().toLowerCase();
+          return itLine === s || itLine.includes(s) || s.includes(itLine);
+        });
+        if (!matches) return false;
+      }
+
+      if (selectedCategories.length > 0) {
+        const itCat = (it.category || "").trim().toLowerCase();
+        const matches = selectedCategories.some((sc) => {
+          const s = sc.trim().toLowerCase();
+          return itCat === s || itCat.includes(s) || s.includes(itCat);
+        });
+        if (!matches) return false;
+      }
+
+      if (selectedSuppliers.length > 0) {
+        const itSup = (it.supplier || "").trim().toLowerCase();
+        const matches = selectedSuppliers.some((ss) => {
+          const s = ss.trim().toLowerCase();
+          return itSup === s || itSup.includes(s) || s.includes(itSup);
+        });
+        if (!matches) return false;
+      }
+
       const oStatus = orderStatuses.find(s => s.barcode === it.barcode);
       const isOrdered = oStatus?.isOrdered || false;
       if (filterOrderStatus === "ordered" && !isOrdered) return false;
@@ -303,7 +337,7 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
 
       return true;
     });
-  }, [lowStockItems, search, selectedLine, selectedCategory, selectedSupplier, filterOrderStatus, orderStatuses]);
+  }, [lowStockItems, search, selectedLines, selectedCategories, selectedSuppliers, filterOrderStatus, orderStatuses]);
 
   // Compute reorder quantities and estimated costs
   const reorderCalculations = useMemo(() => {
@@ -462,6 +496,44 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
     exportToExcel("PASAYA_PURCHASE_REORDER_LIST", "ReorderPlan", headers, rows);
   };
 
+  const handleCreatePurchaseOrderFromFiltered = () => {
+    if (!onCreatePurchaseOrder) return;
+    const filterParts = [];
+    if (selectedLines.length > 0) filterParts.push(`ไลน์: ${selectedLines.join(", ")}`);
+    if (selectedCategories.length > 0) filterParts.push(`หมวด: ${selectedCategories.join(", ")}`);
+    if (selectedSuppliers.length > 0) filterParts.push(`Supplier: ${selectedSuppliers.join(", ")}`);
+    if (search) filterParts.push(`ค้นหา: "${search}"`);
+    if (filterOrderStatus !== "all") filterParts.push(`สถานะ: ${filterOrderStatus === "ordered" ? "สั่งแล้ว" : "ยังไม่ได้สั่ง"}`);
+    const filterContext = filterParts.length > 0 ? filterParts.join(" | ") : "รายการที่กรองทั้งหมด";
+
+    const poItems: PurchaseOrderItem[] = reorderCalculations.map((r) => {
+      const bKey = r.item.barcode.trim().toLowerCase();
+      let burnRate = burnRateMap.get(bKey) || 0;
+      if (burnRate === 0 && r.item.minStock > 0) {
+        burnRate = Math.max(0.5, r.item.minStock / 3);
+      }
+
+      return {
+        barcode: r.item.barcode,
+        itemName: r.item.name,
+        line: r.item.line || "-",
+        supplier: r.item.supplier || "-",
+        unit: r.item.unit || "ชิ้น",
+        monthlyBurnRate: parseFloat(burnRate.toFixed(1)),
+        monthsOfStock: r.monthsOfStockRemaining,
+        stockStatus: r.item.currentBalance <= 0 ? "out" : r.item.currentBalance <= r.item.minStock ? "low" : "ok",
+        currentBalance: r.item.currentBalance,
+        minStock: r.item.minStock,
+        recommendedOrder: r.deficit,
+        orderQty: r.deficit,
+        unitPrice: r.item.unitCost || 0,
+        totalCost: r.estimatedCost,
+      };
+    });
+
+    onCreatePurchaseOrder(poItems, `ดึงจากหน้าเตือนสั่งซื้อ (${filterContext})`, safetyBufferPercent);
+  };
+
   return (
     <div className="space-y-4 pb-12">
       {/* Header Banner */}
@@ -479,26 +551,50 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
           </p>
         </div>
 
-        {canExport && (
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {onNavigateToMonthly && (
             <button
-              onClick={handleExportExcel}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition cursor-pointer"
-              title="ส่งออกใบสั่งซื้อ Excel (.xlsx)"
+              onClick={onNavigateToMonthly}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 shadow-2xs hover:shadow-xs transition cursor-pointer"
+              title="ดูรายงานอัตราการใช้งานเฉลี่ยและสถิติรายเดือน"
             >
-              <FileSpreadsheet className="w-4 h-4" />
-              <span>ส่งออก Excel</span>
+              <Calendar className="w-4 h-4 text-sky-600" />
+              <span>ดูใช้งานแต่ละเดือน</span>
             </button>
+          )}
+
+          {onCreatePurchaseOrder && (
             <button
-              onClick={handleExportCSV}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer"
-              title="ส่งออกใบสั่งซื้อ CSV (.csv)"
+              onClick={handleCreatePurchaseOrderFromFiltered}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white shadow-md hover:shadow-lg transition cursor-pointer"
+              title="สร้างใบสั่งซื้อเฉพาะรายการที่ Filter ณ ตอนนี้"
             >
-              <Download className="w-4 h-4" />
-              <span>ส่งออก CSV</span>
+              <ShoppingBag className="w-4 h-4" />
+              <span>สร้างใบสั่งซื้อจากที่กรอง ({reorderCalculations.length})</span>
             </button>
-          </div>
-        )}
+          )}
+
+          {canExport && (
+            <>
+              <button
+                onClick={handleExportExcel}
+                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition cursor-pointer"
+                title="ส่งออกใบสั่งซื้อ Excel (.xlsx)"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>ส่งออก Excel</span>
+              </button>
+              <button
+                onClick={handleExportCSV}
+                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer"
+                title="ส่งออกใบสั่งซื้อ CSV (.csv)"
+              >
+                <Download className="w-4 h-4" />
+                <span>ส่งออก CSV</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Summary Stat Cards */}
@@ -538,79 +634,159 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           {/* Search */}
-          <div className="relative lg:col-span-2">
+          <div className="relative lg:col-span-1">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="ค้นหาบาร์โค้ด, รายการ, Supplier, ชนิด..."
+              placeholder="ค้นหาบาร์โค้ด, รายการ, Supplier..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
             />
           </div>
 
-          {/* Line filter */}
+          {/* Line Multi-Select filter */}
           <div>
-            <select
-              value={selectedLine}
-              onChange={(e) => setSelectedLine(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
-            >
-              <option value="all">ไลน์ทั้งหมด ({lines.length})</option>
-              {lines.map((l) => (
-                <option key={l} value={l}>
-                  {l}
-                </option>
-              ))}
-            </select>
+            <MultiSelectFilter
+              label="ไลน์ผลิต"
+              placeholder="เลือกไลน์ (ทั้งหมด)"
+              options={lines.map((l) => ({ value: l, label: l }))}
+              selectedValues={selectedLines}
+              onChange={setSelectedLines}
+              icon={Layers}
+            />
           </div>
 
-          {/* Category filter */}
+          {/* Category Multi-Select filter */}
           <div>
-            <select
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
-            >
-              <option value="all">ชนิดสินค้าทั้งหมด ({uniqueCategories.length})</option>
-              {uniqueCategories.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+            <MultiSelectFilter
+              label="หมวดหมู่"
+              placeholder="เลือกหมวดหมู่ (ทั้งหมด)"
+              options={uniqueCategories.map((c) => ({ value: c, label: c }))}
+              selectedValues={selectedCategories}
+              onChange={setSelectedCategories}
+              icon={Package}
+            />
           </div>
 
-          
+          {/* Supplier Multi-Select filter */}
+          <div>
+            <MultiSelectFilter
+              label="Supplier"
+              placeholder="เลือก Supplier (ทั้งหมด)"
+              options={uniqueSuppliers.map((s) => ({ value: s, label: s }))}
+              selectedValues={selectedSuppliers}
+              onChange={setSelectedSuppliers}
+              icon={Boxes}
+            />
+          </div>
+
           {/* Order Status filter */}
           <div>
             <select
               value={filterOrderStatus}
               onChange={(e) => setFilterOrderStatus(e.target.value as any)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500 h-[38px]"
             >
-              <option value="all">สถานะหมายเหตุทั้งหมด</option>
+              <option value="all">สถานะสั่งซื้อทั้งหมด</option>
               <option value="not_ordered">ยังไม่ได้สั่งซื้อ</option>
               <option value="ordered">สั่งซื้อแล้วรอจัดส่ง</option>
             </select>
           </div>
-
-          {/* Supplier filter */}
-          <div>
-            <select
-              value={selectedSupplier}
-              onChange={(e) => setSelectedSupplier(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
-            >
-              <option value="all">Supplier ทั้งหมด ({uniqueSuppliers.length})</option>
-              {uniqueSuppliers.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </div>
         </div>
+
+        {/* Active Filter Chips Bar */}
+        {(selectedLines.length > 0 ||
+          selectedCategories.length > 0 ||
+          selectedSuppliers.length > 0 ||
+          search.trim() !== "" ||
+          filterOrderStatus !== "all") && (
+          <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-100 text-xs">
+            <span className="text-[11px] font-bold text-slate-400 mr-1">ตัวกรองที่เลือก:</span>
+
+            {selectedLines.map((l) => (
+              <span
+                key={l}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-50 text-sky-800 border border-sky-200 text-[11px] font-medium"
+              >
+                <span>ไลน์: {l}</span>
+                <button
+                  onClick={() => setSelectedLines((prev) => prev.filter((x) => x !== l))}
+                  className="text-sky-400 hover:text-sky-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+
+            {selectedCategories.map((c) => (
+              <span
+                key={c}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-800 border border-indigo-200 text-[11px] font-medium"
+              >
+                <span>หมวด: {c}</span>
+                <button
+                  onClick={() => setSelectedCategories((prev) => prev.filter((x) => x !== c))}
+                  className="text-indigo-400 hover:text-indigo-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+
+            {selectedSuppliers.map((s) => (
+              <span
+                key={s}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-medium"
+              >
+                <span>Supplier: {s}</span>
+                <button
+                  onClick={() => setSelectedSuppliers((prev) => prev.filter((x) => x !== s))}
+                  className="text-emerald-400 hover:text-emerald-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+
+            {filterOrderStatus !== "all" && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-medium">
+                <span>สถานะ: {filterOrderStatus === "ordered" ? "สั่งซื้อแล้ว" : "ยังไม่ได้สั่งซื้อ"}</span>
+                <button
+                  onClick={() => setFilterOrderStatus("all")}
+                  className="text-amber-400 hover:text-amber-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            )}
+
+            {search && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-800 border border-slate-200 text-[11px] font-medium">
+                <span>ค้นหา: &quot;{search}&quot;</span>
+                <button
+                  onClick={() => setSearch("")}
+                  className="text-slate-400 hover:text-slate-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            )}
+
+            <button
+              onClick={() => {
+                setSelectedLines([]);
+                setSelectedCategories([]);
+                setSelectedSuppliers([]);
+                setFilterOrderStatus("all");
+                setSearch("");
+              }}
+              className="text-[11px] font-bold text-rose-600 hover:text-rose-800 ml-auto px-2 py-0.5 rounded hover:bg-rose-50 transition cursor-pointer"
+            >
+              ล้างตัวกรองทั้งหมด
+            </button>
+          </div>
+        )}
 
         {/* Safety buffer setting & Sorting */}
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs">
@@ -657,7 +833,6 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
         </div>
       </div>
 
-      
       {/* Order Lot Management Bar & Modal */}
       <OrderLotManager
         orderStatuses={orderStatuses}
@@ -805,7 +980,7 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
 
                   return (
                     <tr
-                      key={it.id}
+                      key={`${it.id || it.barcode}_${idx}`}
                       onClick={() => onSelectItem(it)}
                       className={`transition cursor-pointer ${isOrdered ? "bg-emerald-50/70 hover:bg-emerald-100" : "hover:bg-amber-50/40"}`}
                     >
@@ -956,6 +1131,16 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
               )}
             </tbody>
           </table>
+        </div>
+
+        {/* Table footer summary */}
+        <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+          <div className="text-slate-600 font-medium">
+            แสดงทั้งหมด {reorderCalculations.length.toLocaleString()} รายการที่ต้องสั่งซื้อ (แสดงครบในหน้าเดียว)
+          </div>
+          <div className="text-slate-500">
+            ยอดรวมแนะนำสั่งซื้อ: <span className="font-bold text-slate-800">{reorderCalculations.reduce((sum, r) => sum + r.deficit, 0).toLocaleString()} ชิ้น</span> | ประมาณการงบประมาณ: <span className="font-bold text-amber-700">฿{reorderCalculations.reduce((sum, r) => sum + r.estimatedCost, 0).toLocaleString()}</span>
+          </div>
         </div>
       </div>
     </div>

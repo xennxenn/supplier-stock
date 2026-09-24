@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef, useDeferredValue } from "react";
 import {
   FileSpreadsheet,
   Search,
@@ -16,6 +16,7 @@ import {
   ArrowUp,
   ArrowDown,
   FileDown,
+  Info,
 } from "lucide-react";
 import type { Transaction, StockItem, Employee } from "../types";
 import { exportToExcel, exportToCSV, parseFlexibleDate } from "../utils/exportUtils";
@@ -26,6 +27,7 @@ interface TransactionsViewProps {
   lines: string[];
   stockItems?: StockItem[];
   currentUser?: Employee;
+  onSelectItem?: (item: StockItem) => void;
 }
 
 type SortField =
@@ -46,8 +48,10 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
   lines,
   stockItems = [],
   currentUser,
+  onSelectItem,
 }) => {
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
   const [selectedType, setSelectedType] = useState<"all" | "in" | "out">("all");
   const [selectedLine, setSelectedLine] = useState("all");
   const [selectedSupplier, setSelectedSupplier] = useState("all");
@@ -59,8 +63,11 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
   const [sortField, setSortField] = useState<SortField>("date");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
 
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
+  const INITIAL_BATCH = 60;
+  const BATCH_INCREMENT = 60;
+  const [visibleCount, setVisibleCount] = useState<number>(INITIAL_BATCH);
+  const [showAllDirectly, setShowAllDirectly] = useState<boolean>(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   // Map barcodes to Supplier
   const barcodeSupplierMap = useMemo(() => {
@@ -72,6 +79,48 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
     }
     return map;
   }, [stockItems]);
+
+  // Map barcodes to StockItem for quick double-click lookup
+  const barcodeItemMap = useMemo(() => {
+    const map = new Map<string, StockItem>();
+    for (const item of stockItems) {
+      const code = item.barcode.trim().toLowerCase();
+      if (!map.has(code)) {
+        map.set(code, item);
+      }
+    }
+    return map;
+  }, [stockItems]);
+
+  const handleRowDoubleClick = (tx: Transaction) => {
+    if (!onSelectItem) return;
+    const cleanCode = tx.barcode.trim().toLowerCase();
+    const existing = barcodeItemMap.get(cleanCode);
+    if (existing) {
+      onSelectItem(existing);
+    } else {
+      const supp = barcodeSupplierMap.get(cleanCode) || "";
+      const fallbackItem: StockItem = {
+        id: tx.id || `item-${tx.barcode}`,
+        barcode: tx.barcode,
+        name: tx.itemName,
+        category: "ทั่วไป",
+        line: tx.line || "",
+        supplier: supp !== "-" ? supp : "",
+        unit: tx.unit || "ชิ้น",
+        forwardBalance: 0,
+        currentBalance: tx.balance || 0,
+        qty: tx.balance || 0,
+        minStock: 0,
+        unitCost: tx.unitPrice || 0,
+        image: "",
+        location: "-",
+        note: "",
+        updatedAt: tx.date,
+      };
+      onSelectItem(fallbackItem);
+    }
+  };
 
   // Unique Suppliers list
   const uniqueSuppliers = useMemo(() => {
@@ -95,8 +144,8 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
   // Filter transactions
   const filtered = useMemo(() => {
     return transactions.filter((t) => {
-      if (search) {
-        const q = search.toLowerCase();
+      if (deferredSearch) {
+        const q = deferredSearch.toLowerCase();
         const matchBarcode = t.barcode.toLowerCase().includes(q);
         const matchName = t.itemName.toLowerCase().includes(q);
         const matchEmpName = (t.employeeName || "").toLowerCase().includes(q);
@@ -132,7 +181,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
     });
   }, [
     transactions,
-    search,
+    deferredSearch,
     selectedType,
     selectedLine,
     selectedSupplier,
@@ -210,11 +259,39 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
     }
   };
 
-  const totalPages = Math.ceil(sortedTransactions.length / pageSize) || 1;
-  const paginated = useMemo(() => {
-    const start = (currentPage - 1) * pageSize;
-    return sortedTransactions.slice(start, start + pageSize);
-  }, [sortedTransactions, currentPage, pageSize]);
+  // Reset visible count when filters or sorting change
+  useEffect(() => {
+    setVisibleCount(INITIAL_BATCH);
+  }, [search, selectedType, selectedLine, selectedSupplier, selectedStatus, selectedMonth, selectedYear, sortField, sortDirection]);
+
+  // Displayed transactions for single-page continuous scrolling
+  const displayedTransactions = useMemo(() => {
+    if (showAllDirectly) return sortedTransactions;
+    return sortedTransactions.slice(0, visibleCount);
+  }, [sortedTransactions, visibleCount, showAllDirectly]);
+
+  // Automatic infinite continuous scroll when user scrolls down
+  useEffect(() => {
+    if (showAllDirectly || visibleCount >= sortedTransactions.length) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+
+    let isFetching = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && !isFetching) {
+          isFetching = true;
+          setVisibleCount((prev) => Math.min(prev + BATCH_INCREMENT, sortedTransactions.length));
+          setTimeout(() => {
+            isFetching = false;
+          }, 120);
+        }
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [showAllDirectly, visibleCount, sortedTransactions.length]);
 
   // Summary of filtered dataset
   const totalQtyIn = useMemo(
@@ -381,10 +458,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
               type="text"
               placeholder="ค้นหาบาร์โค้ด, รายการ, ผู้เบิก, Supplier, วันที่..."
               value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
             />
           </div>
@@ -393,10 +467,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           <div>
             <select
               value={selectedType}
-              onChange={(e) => {
-                setSelectedType(e.target.value as any);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSelectedType(e.target.value as any)}
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <option value="all">ประเภท: ทั้งหมด</option>
@@ -409,10 +480,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           <div>
             <select
               value={selectedLine}
-              onChange={(e) => {
-                setSelectedLine(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSelectedLine(e.target.value)}
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <option value="all">ไลน์: ทั้งหมด</option>
@@ -428,10 +496,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           <div>
             <select
               value={selectedSupplier}
-              onChange={(e) => {
-                setSelectedSupplier(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSelectedSupplier(e.target.value)}
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <option value="all">Supplier: ทั้งหมด ({uniqueSuppliers.length})</option>
@@ -447,10 +512,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           <div className="flex gap-1.5">
             <select
               value={selectedMonth}
-              onChange={(e) => {
-                setSelectedMonth(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSelectedMonth(e.target.value)}
               className="w-1/2 px-2 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <option value="all">ทุกเดือน</option>
@@ -463,10 +525,7 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
 
             <select
               value={selectedYear}
-              onChange={(e) => {
-                setSelectedYear(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSelectedYear(e.target.value)}
               className="w-1/2 px-2 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <option value="all">ทุกปี</option>
@@ -541,20 +600,20 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-slate-400">แสดง:</span>
-            <select
-              value={pageSize}
-              onChange={(e) => {
-                setPageSize(Number(e.target.value));
-                setCurrentPage(1);
-              }}
-              className="px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+            <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200/80">
+              💡 ดับเบิ้ลคลิกแถวเพื่อดูรายละเอียดสินค้า
+            </span>
+            <button
+              onClick={() => setShowAllDirectly(!showAllDirectly)}
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                showAllDirectly
+                  ? "bg-slate-900 text-white border-slate-900"
+                  : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100"
+              }`}
+              title="สลับระหว่างการโหลดต่อเนื่อง กับ แสดงข้อมูลทั้งหมดทันที"
             >
-              <option value={25}>25 รายการ</option>
-              <option value={50}>50 รายการ</option>
-              <option value={100}>100 รายการ</option>
-              <option value={200}>200 รายการ</option>
-            </select>
+              {showAllDirectly ? "แสดงครบทั้งหมดแล้ว" : "เลื่อนดูต่อเนื่อง (Scroll)"}
+            </button>
           </div>
         </div>
       </div>
@@ -680,20 +739,26 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginated.length === 0 ? (
+              {displayedTransactions.length === 0 ? (
                 <tr>
                   <td colSpan={13} className="text-center py-12 text-slate-400 text-sm">
                     ไม่พบบันทึกการเบิกจ่ายตามเงื่อนไข
                   </td>
                 </tr>
               ) : (
-                paginated.map((tx, idx) => {
-                  const globalIdx = (currentPage - 1) * pageSize + idx + 1;
+                displayedTransactions.map((tx, idx) => {
+                  const globalIdx = idx + 1;
                   const isIn = tx.qtyIn > 0;
                   const supp = barcodeSupplierMap.get(tx.barcode.trim().toLowerCase()) || "-";
 
                   return (
-                    <tr key={tx.id || idx} className="hover:bg-slate-50 transition">
+                    <tr
+                      key={`${tx.id || "tx"}_${idx}`}
+                      onDoubleClick={() => handleRowDoubleClick(tx)}
+                      style={{ contentVisibility: "auto", containIntrinsicSize: "1px 48px" }}
+                      className="hover:bg-amber-50/50 transition cursor-pointer select-none group"
+                      title="ดับเบิ้ลคลิกเพื่อดูรายละเอียดของรายการสินค้านี้"
+                    >
                       <td className="p-3 text-center text-slate-400 font-mono">
                         {globalIdx}
                       </td>
@@ -771,32 +836,56 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({
           </table>
         </div>
 
-        {/* Pagination */}
+        {/* Continuous scroll sentinel */}
+        <div ref={sentinelRef} className="h-4 w-full" />
+
+        {/* Continuous Scroll Info Bar */}
         <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
-          <div className="text-slate-500">
-            แสดง {(currentPage - 1) * pageSize + 1} -{" "}
-            {Math.min(currentPage * pageSize, sortedTransactions.length)} จาก{" "}
-            {sortedTransactions.length.toLocaleString()} รายการ
+          <div className="text-slate-600 flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-slate-800">
+              แสดง {displayedTransactions.length.toLocaleString()} จาก {sortedTransactions.length.toLocaleString()} รายการ
+            </span>
+            {displayedTransactions.length < sortedTransactions.length && (
+              <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-full border border-amber-200">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                เลื่อนลงเพื่อดูข้อมูลเพิ่มอัตโนมัติ
+              </span>
+            )}
+            {displayedTransactions.length >= sortedTransactions.length && sortedTransactions.length > 0 && (
+              <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 font-medium">
+                ✓ แสดงครบทุกรายการแล้ว
+              </span>
+            )}
           </div>
 
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage <= 1}
-              className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-40 transition cursor-pointer"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <span className="px-3 py-1 font-semibold text-slate-800">
-              หน้า {currentPage} / {totalPages}
-            </span>
-            <button
-              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-              disabled={currentPage >= totalPages}
-              className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-40 transition cursor-pointer"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
+          <div className="flex items-center gap-2">
+            {displayedTransactions.length < sortedTransactions.length && (
+              <>
+                <button
+                  onClick={() => setVisibleCount((prev) => Math.min(prev + 200, sortedTransactions.length))}
+                  className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 font-medium transition cursor-pointer shadow-2xs"
+                >
+                  โหลดเพิ่ม +200 รายการ
+                </button>
+                <button
+                  onClick={() => setShowAllDirectly(true)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-900 text-white font-medium hover:bg-slate-800 transition cursor-pointer shadow-2xs"
+                >
+                  แสดงทั้งหมด ({sortedTransactions.length.toLocaleString()})
+                </button>
+              </>
+            )}
+            {showAllDirectly && sortedTransactions.length > INITIAL_BATCH && (
+              <button
+                onClick={() => {
+                  setShowAllDirectly(false);
+                  setVisibleCount(INITIAL_BATCH);
+                }}
+                className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 text-xs transition cursor-pointer"
+              >
+                ย่อกลับ (แสดงทีละชุด)
+              </button>
+            )}
           </div>
         </div>
       </div>

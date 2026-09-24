@@ -27,6 +27,7 @@ import {
   BookmarkCheck,
   AlertCircle,
   X,
+  Boxes,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -37,10 +38,11 @@ import {
   Tooltip,
   Legend,
 } from "recharts";
-import type { StockItem, Transaction, ForecastItem, Employee, OrderStatus } from "../types";
+import type { StockItem, Transaction, ForecastItem, Employee, OrderStatus, PurchaseOrderItem } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
 import { OrderLotManager } from "./OrderLotManager";
+import { MultiSelectFilter } from "./MultiSelectFilter";
 
 interface ForecastPlanningViewProps {
   items: StockItem[];
@@ -50,6 +52,11 @@ interface ForecastPlanningViewProps {
   currentUser?: Employee;
   onSelectItem: (item: StockItem) => void;
   onQuickMove: (item: StockItem, type: "in" | "out") => void;
+  onCreatePurchaseOrder?: (
+    items: PurchaseOrderItem[],
+    filterSummary: string,
+    bufferPercent: number
+  ) => void;
 }
 
 type ForecastSortField =
@@ -72,6 +79,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   currentUser,
   onSelectItem,
   onQuickMove,
+  onCreatePurchaseOrder,
 }) => {
   const canReceive = hasPermission(currentUser, "receive");
   const canExport = hasPermission(currentUser, "importExport");
@@ -79,9 +87,9 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   const [forecastHorizon, setForecastHorizon] = useState<3 | 6 | 9 | 12>(6);
   const [bufferPercent, setBufferPercent] = useState<number>(10); // +10% default growth/safety buffer
   const [search, setSearch] = useState("");
-  const [selectedLine, setSelectedLine] = useState("all");
-  const [selectedCategory, setSelectedCategory] = useState("all");
-  const [selectedSupplier, setSelectedSupplier] = useState("all");
+  const [selectedLines, setSelectedLines] = useState<string[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
   const [selectedRisk, setSelectedRisk] = useState<"all" | "critical" | "warning" | "ok" | "overstock">("all");
   const [filterOrderStatus, setFilterOrderStatus] = useState<"all" | "ordered" | "not_ordered">("all");
   const [sortField, setSortField] = useState<ForecastSortField>("estimatedCost");
@@ -352,16 +360,40 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   const filteredItems = useMemo(() => {
     return forecastItems.filter((f) => {
       if (search) {
-        const q = search.toLowerCase();
+        const q = search.toLowerCase().trim();
         const matchBarcode = f.item.barcode.toLowerCase().includes(q);
         const matchName = f.item.name.toLowerCase().includes(q);
         const matchSupplier = (f.item.supplier || "").toLowerCase().includes(q);
         if (!matchBarcode && !matchName && !matchSupplier) return false;
       }
 
-      if (selectedLine !== "all" && f.item.line !== selectedLine) return false;
-      if (selectedCategory !== "all" && f.item.category !== selectedCategory) return false;
-      if (selectedSupplier !== "all" && f.item.supplier !== selectedSupplier) return false;
+      if (selectedLines.length > 0) {
+        const itLine = (f.item.line || "").trim().toLowerCase();
+        const matches = selectedLines.some((sl) => {
+          const s = sl.trim().toLowerCase();
+          return itLine === s || itLine.includes(s) || s.includes(itLine);
+        });
+        if (!matches) return false;
+      }
+
+      if (selectedCategories.length > 0) {
+        const itCat = (f.item.category || "").trim().toLowerCase();
+        const matches = selectedCategories.some((sc) => {
+          const s = sc.trim().toLowerCase();
+          return itCat === s || itCat.includes(s) || s.includes(itCat);
+        });
+        if (!matches) return false;
+      }
+
+      if (selectedSuppliers.length > 0) {
+        const itSup = (f.item.supplier || "").trim().toLowerCase();
+        const matches = selectedSuppliers.some((ss) => {
+          const s = ss.trim().toLowerCase();
+          return itSup === s || itSup.includes(s) || s.includes(itSup);
+        });
+        if (!matches) return false;
+      }
+
       if (selectedRisk !== "all" && f.riskLevel !== selectedRisk) return false;
       
       const oStatus = orderStatuses.find(s => s.barcode === f.item.barcode);
@@ -371,7 +403,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
       return true;
     });
-  }, [forecastItems, search, selectedLine, selectedCategory, selectedSupplier, selectedRisk, filterOrderStatus, orderStatuses]);
+  }, [forecastItems, search, selectedLines, selectedCategories, selectedSuppliers, selectedRisk, filterOrderStatus, orderStatuses]);
 
   // Sort items
   const sortedItems = useMemo(() => {
@@ -546,6 +578,40 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
     exportToExcel(`PASAYA_DEMAND_FORECAST_${forecastHorizon}M`, `Forecast_${forecastHorizon}M`, headers, rows);
   };
 
+  const handleCreatePurchaseOrderFromFiltered = () => {
+    if (!onCreatePurchaseOrder) return;
+    const filterParts = [];
+    if (selectedLines.length > 0) filterParts.push(`ไลน์: ${selectedLines.join(", ")}`);
+    if (selectedCategories.length > 0) filterParts.push(`หมวด: ${selectedCategories.join(", ")}`);
+    if (selectedSuppliers.length > 0) filterParts.push(`Supplier: ${selectedSuppliers.join(", ")}`);
+    if (selectedRisk !== "all") filterParts.push(`ความเสี่ยง: ${selectedRisk}`);
+    if (search) filterParts.push(`ค้นหา: "${search}"`);
+    if (filterOrderStatus !== "all") filterParts.push(`สถานะ: ${filterOrderStatus === "ordered" ? "สั่งแล้ว" : "ยังไม่ได้สั่ง"}`);
+    const filterContext = filterParts.length > 0 ? filterParts.join(" | ") : `พยากรณ์ ${forecastHorizon} เดือน`;
+
+    const poItems: PurchaseOrderItem[] = sortedItems.map((f) => {
+      const orderQty = Math.max(0, f.recommendedOrder || f.deficit || 0);
+      return {
+        barcode: f.item.barcode,
+        itemName: f.item.name,
+        line: f.item.line || "-",
+        supplier: f.item.supplier || "-",
+        unit: f.item.unit || "ชิ้น",
+        monthlyBurnRate: parseFloat(f.monthlyBurnRate.toFixed(1)),
+        monthsOfStock: f.monthsOfStockRemaining,
+        stockStatus: f.riskLevel === "critical" ? "out" : f.riskLevel === "warning" ? "low" : "ok",
+        currentBalance: f.item.currentBalance,
+        minStock: f.item.minStock,
+        recommendedOrder: orderQty,
+        orderQty: orderQty,
+        unitPrice: f.item.unitCost || 0,
+        totalCost: orderQty * (f.item.unitCost || 0),
+      };
+    });
+
+    onCreatePurchaseOrder(poItems, `ดึงจากหน้าพยากรณ์สั่งซื้อ (${filterContext})`, bufferPercent);
+  };
+
   return (
     <div className="space-y-5 pb-12">
       {/* Top Welcome Banner */}
@@ -566,6 +632,17 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
         {/* Horizon Switcher & Export */}
         <div className="flex flex-wrap items-center gap-2">
+          {onCreatePurchaseOrder && (
+            <button
+              onClick={handleCreatePurchaseOrderFromFiltered}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white shadow-md hover:shadow-lg transition cursor-pointer"
+              title="สร้างใบสั่งซื้อเฉพาะรายการที่ Filter ณ ตอนนี้"
+            >
+              <Package className="w-4 h-4" />
+              <span>สร้างใบสั่งซื้อจากที่กรอง ({sortedItems.length})</span>
+            </button>
+          )}
+
           <div className="bg-white p-1.5 rounded-xl border border-slate-200 flex items-center gap-1 shadow-xs">
             <span className="text-[11px] font-semibold text-slate-500 px-2 flex items-center gap-1">
               <Calendar className="w-3.5 h-3.5 text-amber-600" />
@@ -715,36 +792,40 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
             />
           </div>
 
-          {/* Line */}
+          {/* Line Multi-Select */}
           <div>
-            <select
-              value={selectedLine}
-              onChange={(e) => setSelectedLine(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
-            >
-              <option value="all">ไลน์ทั้งหมด ({lines.length})</option>
-              {lines.map((l) => (
-                <option key={l} value={l}>
-                  {l}
-                </option>
-              ))}
-            </select>
+            <MultiSelectFilter
+              label="ไลน์ผลิต"
+              placeholder="เลือกไลน์ (ทั้งหมด)"
+              options={lines.map((l) => ({ value: l, label: l }))}
+              selectedValues={selectedLines}
+              onChange={setSelectedLines}
+              icon={Layers}
+            />
           </div>
 
-          {/* Category */}
+          {/* Category Multi-Select */}
           <div>
-            <select
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
-            >
-              <option value="all">ชนิดสินค้าทั้งหมด ({categories.length})</option>
-              {categories.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+            <MultiSelectFilter
+              label="หมวดหมู่"
+              placeholder="เลือกหมวดหมู่ (ทั้งหมด)"
+              options={categories.map((c) => ({ value: c, label: c }))}
+              selectedValues={selectedCategories}
+              onChange={setSelectedCategories}
+              icon={Package}
+            />
+          </div>
+
+          {/* Supplier Multi-Select */}
+          <div>
+            <MultiSelectFilter
+              label="Supplier"
+              placeholder="เลือก Supplier (ทั้งหมด)"
+              options={uniqueSuppliers.map((s) => ({ value: s, label: s }))}
+              selectedValues={selectedSuppliers}
+              onChange={setSelectedSuppliers}
+              icon={Boxes}
+            />
           </div>
 
           {/* Order Status */}
@@ -752,30 +833,121 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
             <select
               value={filterOrderStatus}
               onChange={(e) => setFilterOrderStatus(e.target.value as any)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500 h-[38px]"
             >
-              <option value="all">หมายเหตุ: แสดงทั้งหมด</option>
+              <option value="all">สถานะสั่งซื้อทั้งหมด</option>
               <option value="ordered">สั่งซื้อแล้วรอจัดส่ง</option>
               <option value="not_ordered">ยังไม่ได้สั่งซื้อ</option>
             </select>
           </div>
-
-          {/* Supplier */}
-          <div>
-            <select
-              value={selectedSupplier}
-              onChange={(e) => setSelectedSupplier(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"
-            >
-              <option value="all">Supplier ทั้งหมด ({uniqueSuppliers.length})</option>
-              {uniqueSuppliers.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </div>
         </div>
+
+        {/* Active Filter Chips Bar */}
+        {(selectedLines.length > 0 ||
+          selectedCategories.length > 0 ||
+          selectedSuppliers.length > 0 ||
+          selectedRisk !== "all" ||
+          search.trim() !== "" ||
+          filterOrderStatus !== "all") && (
+          <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-100 text-xs">
+            <span className="text-[11px] font-bold text-slate-400 mr-1">ตัวกรองที่เลือก:</span>
+
+            {selectedLines.map((l) => (
+              <span
+                key={l}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-50 text-sky-800 border border-sky-200 text-[11px] font-medium"
+              >
+                <span>ไลน์: {l}</span>
+                <button
+                  onClick={() => setSelectedLines((prev) => prev.filter((x) => x !== l))}
+                  className="text-sky-400 hover:text-sky-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+
+            {selectedCategories.map((c) => (
+              <span
+                key={c}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-800 border border-indigo-200 text-[11px] font-medium"
+              >
+                <span>หมวด: {c}</span>
+                <button
+                  onClick={() => setSelectedCategories((prev) => prev.filter((x) => x !== c))}
+                  className="text-indigo-400 hover:text-indigo-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+
+            {selectedSuppliers.map((s) => (
+              <span
+                key={s}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-medium"
+              >
+                <span>Supplier: {s}</span>
+                <button
+                  onClick={() => setSelectedSuppliers((prev) => prev.filter((x) => x !== s))}
+                  className="text-emerald-400 hover:text-emerald-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+
+            {selectedRisk !== "all" && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-50 text-rose-800 border border-rose-200 text-[11px] font-medium">
+                <span>ความเสี่ยง: {selectedRisk}</span>
+                <button
+                  onClick={() => setSelectedRisk("all")}
+                  className="text-rose-400 hover:text-rose-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            )}
+
+            {filterOrderStatus !== "all" && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-medium">
+                <span>สถานะ: {filterOrderStatus === "ordered" ? "สั่งซื้อแล้ว" : "ยังไม่ได้สั่งซื้อ"}</span>
+                <button
+                  onClick={() => setFilterOrderStatus("all")}
+                  className="text-amber-400 hover:text-amber-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            )}
+
+            {search && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-800 border border-slate-200 text-[11px] font-medium">
+                <span>ค้นหา: &quot;{search}&quot;</span>
+                <button
+                  onClick={() => setSearch("")}
+                  className="text-slate-400 hover:text-slate-700 ml-0.5 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </span>
+            )}
+
+            <button
+              onClick={() => {
+                setSelectedLines([]);
+                setSelectedCategories([]);
+                setSelectedSuppliers([]);
+                setSelectedRisk("all");
+                setFilterOrderStatus("all");
+                setSearch("");
+              }}
+              className="text-[11px] font-bold text-rose-600 hover:text-rose-800 ml-auto px-2 py-0.5 rounded hover:bg-rose-50 transition cursor-pointer"
+            >
+              ล้างตัวกรองทั้งหมด
+            </button>
+          </div>
+        )}
 
         {/* Risk Toggles & Sorting Controls */}
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs">
@@ -1020,7 +1192,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                   const it = f.item;
                   return (
                     <tr
-                      key={it.id || idx}
+                      key={`${it.id || it.barcode}_${idx}`}
                       onClick={() => onSelectItem(it)}
                       className="hover:bg-amber-50/40 transition cursor-pointer"
                     >

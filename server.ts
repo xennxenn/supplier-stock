@@ -342,16 +342,35 @@ async function appendStoredCustomTransaction(tx: Transaction) {
 
 async function getStoredBackups(): Promise<BackupEntry[]> {
   try {
-    const q = query(collection(db, "backups"), orderBy("timestamp", "desc"));
-    const snap = await getDocs(q);
-    return snap.docs.map(doc => doc.data() as BackupEntry);
+    const snap = await getDocs(collection(db, "backups"));
+    if (!snap.empty) {
+      const items = snap.docs.map(doc => doc.data() as BackupEntry);
+      items.sort((a, b) => new Date(b.ts || (b as any).timestamp || 0).getTime() - new Date(a.ts || (a as any).timestamp || 0).getTime());
+      return items;
+    }
   } catch (err) {
-    console.error("Failed to read backups from Firestore:", err);
-    return [];
+    console.warn("Could not read backups from Firestore, checking disk backup:", err);
   }
+
+  if (fs.existsSync(BACKUPS_FILE)) {
+    try {
+      const raw = fs.readFileSync(BACKUPS_FILE, "utf-8");
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) return list;
+    } catch (e) {
+      console.warn("Failed to read BACKUPS_FILE:", e);
+    }
+  }
+  return [];
 }
 
 async function saveStoredBackups(backups: BackupEntry[]) {
+  try {
+    fs.writeFileSync(BACKUPS_FILE, JSON.stringify(backups, null, 2), "utf-8");
+  } catch (fsErr) {
+    console.warn("Could not save backup to local file:", fsErr);
+  }
+
   try {
     const batch = writeBatch(db);
     const snap = await getDocs(collection(db, "backups"));
@@ -361,7 +380,7 @@ async function saveStoredBackups(backups: BackupEntry[]) {
     });
     await batch.commit();
   } catch (err) {
-    console.error("Failed to save backups to Firestore:", err);
+    console.warn("Failed to sync backups to Firestore:", err);
   }
 }
 

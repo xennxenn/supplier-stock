@@ -92,9 +92,81 @@ export type NavTab =
   | "movement"
   | "alerts"
   | "forecast"
+  | "purchaseOrders"
+  | "monthlyUsage"
   | "reports"
   | "employees"
-  | "backup";
+  | "backup"
+  | "settings";
+
+export interface PurchaseOrderItem {
+  barcode: string;              // 1. บาร์โค้ด
+  itemName: string;             // 2. ชื่อรายการสินค้า
+  line: string;                 // 3. ไลน์
+  supplier: string;             // 3. Supplier
+  unit: string;
+  monthlyBurnRate: number;      // 4. ใช้งานเฉลี่ยต่อเดือน
+  monthsOfStock: number;        // 5. พอใช้กี่เดือน
+  stockStatus: string;          // 6. สถานะ
+  currentBalance: number;       // 7. คงเหลือ
+  minStock: number;             // 8. Min Stock
+  recommendedOrder: number;     // 9. แนะนำสั่งซื้อ (ตาม % เผื่อ)
+  orderQty: number;             // 10. จำนวนที่ต้องการสั่งซื้อ (เลือกตามคำแนะนำหรือระบุเอง)
+  unitPrice: number;            // 11. ราคาต่อหน่วย
+  totalCost: number;            // 12. ค่าใช้จ่ายในการสั่งซื้อ
+  note?: string;
+}
+
+export type PurchaseOrderStatus = "new" | "approved" | "confirm" | "received" | "cancelled";
+
+export interface PurchaseOrder {
+  id: string;
+  poNumber: string;             // เช่น PO-202609-001
+  lotNumber?: string;           // เช่น LOT-202609-001 เมื่อ Confirm
+  title: string;
+  status: PurchaseOrderStatus;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  createdById?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  confirmedBy?: string;
+  confirmedAt?: string;
+  receivedBy?: string;
+  receivedAt?: string;
+  cancelledBy?: string;
+  cancelledAt?: string;
+  cancelReason?: string;
+  safetyBufferPercent: number;  // เผื่อกี่ %
+  filterSummary?: string;       // เงื่อนไข Filter ที่ดึงมา
+  items: PurchaseOrderItem[];
+  totalItems: number;
+  totalOrderQty: number;
+  totalCost: number;
+  notes?: string;
+}
+
+export type LiquidGlassPalette =
+  | "ios-liquid-azure"
+  | "emerald-aurora"
+  | "pasaya-amber-luxe"
+  | "neon-violet"
+  | "titanium-frost"
+  | "rose-gold"
+  | "custom";
+
+export interface LiquidGlassThemeConfig {
+  palette: LiquidGlassPalette;
+  blurIntensity: "subtle" | "medium" | "deep" | "ultra";
+  fluidMotion: boolean;
+  ambientGlow: boolean;
+  isDarkGlass: boolean;
+  customPrimaryColor?: string; // Hex color code e.g. #0ea5e9
+  customBgTone?: string;       // Light/slate/frost/pearl
+  logoUrl?: string;            // Base64 or URL of custom company logo
+  logoText?: string;           // Custom company/brand title
+}
 
 export interface ForecastItem {
   item: StockItem;
@@ -116,12 +188,14 @@ export type PermissionKey =
   | "issue"
   | "viewAlerts"
   | "viewForecast"
+  | "purchaseOrders"
   | "reports"
   | "addItem"
   | "importExport"
   | "employees"
   | "backup"
-  | "manageOrderStatus";
+  | "manageOrderStatus"
+  | "managePurchaseOrders";
 
 export type EmployeePermissions = {
   view?: boolean;
@@ -132,12 +206,14 @@ export type EmployeePermissions = {
   issue?: boolean;
   viewAlerts?: boolean;
   viewForecast?: boolean;
+  purchaseOrders?: boolean;
   reports?: boolean;
   addItem?: boolean;
   importExport?: boolean;
   employees?: boolean;
   backup?: boolean;
   manageOrderStatus?: boolean;
+  managePurchaseOrders?: boolean;
   [key: string]: boolean | undefined;
 };
 

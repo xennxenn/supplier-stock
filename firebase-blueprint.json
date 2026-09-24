@@ -48,6 +48,60 @@
         "qty": { "type": "number", "description": "Quantity moved" }
       },
       "required": ["id", "timestamp", "itemCode", "type", "qty"]
+    },
+    "PurchaseOrder": {
+      "title": "PurchaseOrder",
+      "description": "Purchase order containing line items filtered from alerts or forecast with status lifecycle: New, Approved, Confirm, Received.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier of the purchase order" },
+        "poNumber": { "type": "string", "description": "Human-readable PO number" },
+        "lotNumber": { "type": "string", "description": "Lot number assigned upon confirmation" },
+        "title": { "type": "string", "description": "Purchase order title or description" },
+        "status": { "type": "string", "enum": ["new", "approved", "confirm", "received"], "description": "Lifecycle status" },
+        "createdAt": { "type": "string", "description": "ISO creation timestamp" },
+        "updatedAt": { "type": "string", "description": "ISO update timestamp" },
+        "createdBy": { "type": "string", "description": "Employee name who created this PO" },
+        "createdById": { "type": "string", "description": "Employee ID who created this PO" },
+        "approvedBy": { "type": "string", "description": "Employee name who approved this PO" },
+        "confirmedBy": { "type": "string", "description": "Employee name who confirmed this PO" },
+        "receivedBy": { "type": "string", "description": "Employee name who marked this PO received" },
+        "safetyBufferPercent": { "type": "number", "description": "Safety buffer percentage applied" },
+        "items": { "type": "array", "description": "List of line items in this order" },
+        "totalItems": { "type": "number", "description": "Total number of items" },
+        "totalOrderQty": { "type": "number", "description": "Total quantity ordered" },
+        "totalCost": { "type": "number", "description": "Total cost of order" },
+        "notes": { "type": "string", "description": "Additional notes" }
+      },
+      "required": ["id", "poNumber", "status", "items", "createdAt"]
+    },
+    "AppThemeSettings": {
+      "title": "AppThemeSettings",
+      "description": "Global application theme and liquid glass styling customized by admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "palette": { "type": "string" },
+        "glassBlur": { "type": "string" },
+        "ambientGlow": { "type": "boolean" },
+        "updatedAt": { "type": "string" },
+        "updatedBy": { "type": "string" }
+      },
+      "required": ["id", "palette"]
+    },
+    "Backup": {
+      "title": "Backup",
+      "description": "Stock snapshot and transaction backups saved for system restore points.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ts": { "type": "string" },
+        "itemsCount": { "type": "number" },
+        "txCount": { "type": "number" },
+        "kind": { "type": "string" },
+        "data": { "type": "object" }
+      },
+      "required": ["id", "ts"]
     }
   },
   "firestore": {
@@ -62,6 +116,18 @@
     "/customTransactions/{txId}": {
       "schema": { "$ref": "#/entities/CustomTransaction" },
       "description": "Historical inventory receipts and dispatches recorded via the web application."
+    },
+    "/purchaseOrders/{orderId}": {
+      "schema": { "$ref": "#/entities/PurchaseOrder" },
+      "description": "Real-time purchase orders and procurement lot tracking."
+    },
+    "/appSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppThemeSettings" },
+      "description": "System theme and Liquid Glass styling settings customized by administrators."
+    },
+    "/backups/{backupId}": {
+      "schema": { "$ref": "#/entities/Backup" },
+      "description": "System data snapshots and restore backups."
     }
   }
 }

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef, useDeferredValue } from "react";
 import {
   Search,
   Filter,
@@ -58,14 +58,18 @@ export const StockListView: React.FC<StockListViewProps> = ({
   const canIssue = hasPermission(currentUser, "issue");
   const canExport = hasPermission(currentUser, "importExport");
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [selectedLine, setSelectedLine] = useState("all");
   const [selectedSupplier, setSelectedSupplier] = useState("all");
   const [stockStatusFilter, setStockStatusFilter] = useState<"all" | "low" | "out" | "ok">("all");
   const [sortField, setSortField] = useState<StockSortField>("barcode");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
+  const INITIAL_BATCH = 60;
+  const BATCH_INCREMENT = 60;
+  const [visibleCount, setVisibleCount] = useState<number>(INITIAL_BATCH);
+  const [showAllDirectly, setShowAllDirectly] = useState<boolean>(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Extract unique suppliers
@@ -80,9 +84,9 @@ export const StockListView: React.FC<StockListViewProps> = ({
   // Filter items
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
-      // Search
-      if (search) {
-        const q = search.toLowerCase();
+      // Search with deferred value for 60fps responsive typing
+      if (deferredSearch) {
+        const q = deferredSearch.toLowerCase();
         const matchBarcode = item.barcode.toLowerCase().includes(q);
         const matchName = item.name.toLowerCase().includes(q);
         const matchSupplier = (item.supplier || "").toLowerCase().includes(q);
@@ -118,7 +122,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
 
       return true;
     });
-  }, [items, search, selectedCategory, selectedLine, selectedSupplier, stockStatusFilter]);
+  }, [items, deferredSearch, selectedCategory, selectedLine, selectedSupplier, stockStatusFilter]);
 
   // Sort
   const sortedItems = useMemo(() => {
@@ -202,11 +206,39 @@ export const StockListView: React.FC<StockListViewProps> = ({
     return sortedItems.filter((i) => i.currentBalance <= i.minStock && i.minStock > 0).length;
   }, [sortedItems]);
 
-  const totalPages = Math.ceil(sortedItems.length / pageSize) || 1;
-  const paginatedItems = useMemo(() => {
-    const start = (currentPage - 1) * pageSize;
-    return sortedItems.slice(start, start + pageSize);
-  }, [sortedItems, currentPage, pageSize]);
+  // Reset visible count when filters or sorting change
+  useEffect(() => {
+    setVisibleCount(INITIAL_BATCH);
+  }, [search, selectedCategory, selectedLine, selectedSupplier, stockStatusFilter, sortField, sortOrder]);
+
+  // Displayed items for single-page continuous scrolling
+  const displayedItems = useMemo(() => {
+    if (showAllDirectly) return sortedItems;
+    return sortedItems.slice(0, visibleCount);
+  }, [sortedItems, visibleCount, showAllDirectly]);
+
+  // Automatic infinite continuous scroll when user scrolls down
+  useEffect(() => {
+    if (showAllDirectly || visibleCount >= sortedItems.length) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+
+    let isFetching = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && !isFetching) {
+          isFetching = true;
+          setVisibleCount((prev) => Math.min(prev + BATCH_INCREMENT, sortedItems.length));
+          setTimeout(() => {
+            isFetching = false;
+          }, 120);
+        }
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [showAllDirectly, visibleCount, sortedItems.length]);
 
   const handleCopyBarcode = (barcode: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -276,7 +308,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
             พบทั้งหมด <span className="font-bold text-slate-800">{sortedItems.length.toLocaleString()}</span> จาก{" "}
-            {items.length.toLocaleString()} รายการ (หน้า {currentPage}/{totalPages})
+            {items.length.toLocaleString()} รายการ (แสดงต่อเนื่องหน้าเดียว เลื่อนดูได้เรื่อยๆ)
           </p>
         </div>
 
@@ -355,10 +387,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
               type="text"
               placeholder="ค้นหาบาร์โค้ด, ชื่อรายการสินค้า, Supplier, Location..."
               value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition"
             />
           </div>
@@ -367,10 +396,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
           <div>
             <select
               value={selectedCategory}
-              onChange={(e) => {
-                setSelectedCategory(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSelectedCategory(e.target.value)}
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <option value="all">ชนิดสินค้าทั้งหมด ({categories.length})</option>
@@ -386,10 +412,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
           <div>
             <select
               value={selectedLine}
-              onChange={(e) => {
-                setSelectedLine(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSelectedLine(e.target.value)}
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <option value="all">ไลน์ทั้งหมด ({lines.length})</option>
@@ -405,10 +428,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
           <div>
             <select
               value={selectedSupplier}
-              onChange={(e) => {
-                setSelectedSupplier(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={(e) => setSelectedSupplier(e.target.value)}
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <option value="all">Supplier ทั้งหมด ({uniqueSuppliers.length})</option>
@@ -426,10 +446,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-slate-500 mr-1">สถานะสต็อก:</span>
             <button
-              onClick={() => {
-                setStockStatusFilter("all");
-                setCurrentPage(1);
-              }}
+              onClick={() => setStockStatusFilter("all")}
               className={`px-2.5 py-1 rounded-lg font-medium transition cursor-pointer ${
                 stockStatusFilter === "all"
                   ? "bg-amber-500 text-slate-950 font-bold shadow-xs"
@@ -439,10 +456,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
               ทั้งหมด
             </button>
             <button
-              onClick={() => {
-                setStockStatusFilter("low");
-                setCurrentPage(1);
-              }}
+              onClick={() => setStockStatusFilter("low")}
               className={`px-2.5 py-1 rounded-lg font-medium transition cursor-pointer flex items-center gap-1 ${
                 stockStatusFilter === "low"
                   ? "bg-amber-500 text-slate-950 font-bold"
@@ -453,10 +467,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
               ต่ำกว่า Min Stock
             </button>
             <button
-              onClick={() => {
-                setStockStatusFilter("out");
-                setCurrentPage(1);
-              }}
+              onClick={() => setStockStatusFilter("out")}
               className={`px-2.5 py-1 rounded-lg font-medium transition cursor-pointer ${
                 stockStatusFilter === "out"
                   ? "bg-rose-600 text-white font-bold"
@@ -466,10 +477,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
               หมดสต็อก (0)
             </button>
             <button
-              onClick={() => {
-                setStockStatusFilter("ok");
-                setCurrentPage(1);
-              }}
+              onClick={() => setStockStatusFilter("ok")}
               className={`px-2.5 py-1 rounded-lg font-medium transition cursor-pointer ${
                 stockStatusFilter === "ok"
                   ? "bg-emerald-600 text-white font-bold"
@@ -501,19 +509,17 @@ export const StockListView: React.FC<StockListViewProps> = ({
               <ArrowUpDown className="w-3.5 h-3.5" />
             </button>
 
-            <select
-              value={pageSize}
-              onChange={(e) => {
-                setPageSize(Number(e.target.value));
-                setCurrentPage(1);
-              }}
-              className="px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+            <button
+              onClick={() => setShowAllDirectly(!showAllDirectly)}
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                showAllDirectly
+                  ? "bg-slate-900 text-white border-slate-900"
+                  : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100"
+              }`}
+              title="สลับระหว่างการโหลดต่อเนื่อง กับ แสดงข้อมูลทั้งหมดทันที"
             >
-              <option value={25}>25 / หน้า</option>
-              <option value={50}>50 / หน้า</option>
-              <option value={100}>100 / หน้า</option>
-              <option value={200}>200 / หน้า</option>
-            </select>
+              {showAllDirectly ? "แสดงครบทั้งหมดแล้ว" : "เลื่อนดูต่อเนื่อง (Scroll)"}
+            </button>
           </div>
         </div>
       </div>
@@ -629,23 +635,24 @@ export const StockListView: React.FC<StockListViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginatedItems.length === 0 ? (
+              {displayedItems.length === 0 ? (
                 <tr>
                   <td colSpan={12} className="text-center py-12 text-slate-400 text-sm">
                     ไม่พบรายการสินค้าที่ตรงกับเงื่อนไขการค้นหา
                   </td>
                 </tr>
               ) : (
-                paginatedItems.map((item, idx) => {
-                  const globalIdx = (currentPage - 1) * pageSize + idx + 1;
+                displayedItems.map((item, idx) => {
+                  const globalIdx = idx + 1;
                   const isLow = item.currentBalance <= item.minStock && item.minStock > 0;
                   const isOut = item.currentBalance <= 0;
                   const totalVal = item.currentBalance * item.unitCost;
 
                   return (
                     <tr
-                      key={item.id}
+                      key={`${item.id || item.barcode}_${idx}`}
                       onClick={() => onSelectItem(item)}
+                      style={{ contentVisibility: "auto", containIntrinsicSize: "1px 48px" }}
                       className="hover:bg-amber-50/40 transition cursor-pointer group"
                     >
                       <td className="p-3 text-center text-slate-400 font-mono">
@@ -763,32 +770,56 @@ export const StockListView: React.FC<StockListViewProps> = ({
           </table>
         </div>
 
-        {/* Pagination bar */}
+        {/* Continuous scroll sentinel */}
+        <div ref={sentinelRef} className="h-4 w-full" />
+
+        {/* Continuous Scroll Info Bar */}
         <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
-          <div className="text-slate-500">
-            แสดง {(currentPage - 1) * pageSize + 1} -{" "}
-            {Math.min(currentPage * pageSize, sortedItems.length)} จาก{" "}
-            {sortedItems.length.toLocaleString()} รายการ
+          <div className="text-slate-600 flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-slate-800">
+              แสดง {displayedItems.length.toLocaleString()} จาก {sortedItems.length.toLocaleString()} รายการ
+            </span>
+            {displayedItems.length < sortedItems.length && (
+              <span className="inline-flex items-center gap-1.5 text-[11px] text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-full border border-amber-200">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                เลื่อนลงเพื่อดูข้อมูลเพิ่มอัตโนมัติ
+              </span>
+            )}
+            {displayedItems.length >= sortedItems.length && sortedItems.length > 0 && (
+              <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 font-medium">
+                ✓ แสดงครบทุกรายการแล้ว
+              </span>
+            )}
           </div>
 
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage <= 1}
-              className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-40 transition cursor-pointer"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <span className="px-3 py-1 font-semibold text-slate-800">
-              หน้า {currentPage} / {totalPages}
-            </span>
-            <button
-              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-              disabled={currentPage >= totalPages}
-              className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-40 transition cursor-pointer"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
+          <div className="flex items-center gap-2">
+            {displayedItems.length < sortedItems.length && (
+              <>
+                <button
+                  onClick={() => setVisibleCount((prev) => Math.min(prev + 200, sortedItems.length))}
+                  className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 font-medium transition cursor-pointer shadow-2xs"
+                >
+                  โหลดเพิ่ม +200 รายการ
+                </button>
+                <button
+                  onClick={() => setShowAllDirectly(true)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-900 text-white font-medium hover:bg-slate-800 transition cursor-pointer shadow-2xs"
+                >
+                  แสดงทั้งหมด ({sortedItems.length.toLocaleString()})
+                </button>
+              </>
+            )}
+            {showAllDirectly && sortedItems.length > INITIAL_BATCH && (
+              <button
+                onClick={() => {
+                  setShowAllDirectly(false);
+                  setVisibleCount(INITIAL_BATCH);
+                }}
+                className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 text-xs transition cursor-pointer"
+              >
+                ย่อกลับ (แสดงทีละชุด)
+              </button>
+            )}
           </div>
         </div>
       </div>

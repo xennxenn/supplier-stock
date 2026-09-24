@@ -37,6 +37,12 @@ export const PERMISSION_DEFINITIONS: Array<{
     description: "เข้าถึงหน้าพยากรณ์ความต้องการและแผนการสั่งซื้อสินค้า",
   },
   {
+    key: "purchaseOrders",
+    label: "ดูและสร้างใบสั่งซื้อ (Purchase Orders)",
+    category: "เมนูหลัก (Navigation Tabs)",
+    description: "เข้าถึงหน้าระบบใบสั่งซื้อ รายการสั่งซื้อ และประวัติใบสั่งซื้อ",
+  },
+  {
     key: "reports",
     label: "ดูรายงาน & สถิติ (Reports)",
     category: "เมนูหลัก (Navigation Tabs)",
@@ -71,6 +77,12 @@ export const PERMISSION_DEFINITIONS: Array<{
     label: "จัดการรอบสั่งซื้อ & ติ๊กสถานะ Lot (Order Lot Management)",
     category: "สิทธิ์การดำเนินการ (Actions)",
     description: "สร้าง/บันทึกเลขที่ Lot สั่งซื้อ, ติ๊กหมายเหตุสั่งซื้อ, และล้างรอบสั่งซื้อ (หน้าเตือนสั่งซื้อ & พยากรณ์)",
+  },
+  {
+    key: "managePurchaseOrders",
+    label: "อนุมัติ & เปลี่ยนสถานะใบสั่งซื้อ (PO & Lot Status Management)",
+    category: "สิทธิ์การดำเนินการ (Actions)",
+    description: "อนุมัติใบสั่งซื้อ (Approved), ยืนยันออก Lot (Confirm), และตรวจรับสินค้า (Received)",
   },
   {
     key: "employees",
@@ -146,12 +158,30 @@ export function canAccessTab(
       return hasPermission(user, "viewAlerts") || hasPermission(user, "view");
     case "forecast":
       return hasPermission(user, "viewForecast") || hasPermission(user, "view");
+    case "purchaseOrders":
+      return (
+        hasPermission(user, "purchaseOrders") ||
+        hasPermission(user, "managePurchaseOrders") ||
+        hasPermission(user, "viewAlerts") ||
+        hasPermission(user, "viewForecast") ||
+        hasPermission(user, "manageOrderStatus") ||
+        hasPermission(user, "view")
+      );
+    case "monthlyUsage":
+      return (
+        hasPermission(user, "viewAlerts") ||
+        hasPermission(user, "viewForecast") ||
+        hasPermission(user, "reports") ||
+        hasPermission(user, "view")
+      );
     case "reports":
       return hasPermission(user, "reports");
     case "employees":
       return hasPermission(user, "employees");
     case "backup":
       return hasPermission(user, "backup");
+    case "settings":
+      return false; // Admins are already allowed above
     default:
       return true;
   }
