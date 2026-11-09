@@ -10,6 +10,7 @@ import {
   db,
   purchaseOrdersCol,
   orderStatusCol,
+  getOrderStatusDocId,
   handleFirestoreError,
   OperationType,
 } from "../lib/firebase";
@@ -402,18 +403,22 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
         };
         await setDoc(doc(db, "purchaseOrders", order.id), updatedOrder);
 
-        // Batch sync items to orderStatuses
-        const batch = writeBatch(db);
-        order.items.forEach((it) => {
-          const ref = doc(db, "orderStatuses", it.barcode);
-          batch.set(ref, {
-            barcode: it.barcode,
-            isOrdered: true,
-            lotNumber: lot,
-            updatedAt: now,
+        // Batch sync items to orderStatuses in chunks of 400
+        for (let i = 0; i < order.items.length; i += 400) {
+          const chunk = order.items.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach((it) => {
+            if (!it.barcode) return;
+            const ref = doc(db, "orderStatuses", getOrderStatusDocId(it.barcode));
+            batch.set(ref, {
+              barcode: it.barcode,
+              isOrdered: true,
+              lotNumber: lot,
+              updatedAt: now,
+            });
           });
-        });
-        await batch.commit();
+          await batch.commit();
+        }
 
         fetch("/api/order-status-batch", {
           method: "POST",
@@ -434,13 +439,17 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
         };
         await setDoc(doc(db, "purchaseOrders", order.id), updatedOrder);
 
-        // Clear orderStatuses
-        const batch = writeBatch(db);
-        order.items.forEach((it) => {
-          const ref = doc(db, "orderStatuses", it.barcode);
-          batch.delete(ref);
-        });
-        await batch.commit();
+        // Clear orderStatuses in chunks of 400
+        for (let i = 0; i < order.items.length; i += 400) {
+          const chunk = order.items.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach((it) => {
+            if (!it.barcode) return;
+            const ref = doc(db, "orderStatuses", getOrderStatusDocId(it.barcode));
+            batch.delete(ref);
+          });
+          await batch.commit();
+        }
 
         if (order.lotNumber) {
           fetch("/api/order-status-batch", {
@@ -466,12 +475,16 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
 
         // If it was in confirm/lot, remove from active orderStatuses
         if (order.status === "confirm") {
-          const batch = writeBatch(db);
-          order.items.forEach((it) => {
-            const ref = doc(db, "orderStatuses", it.barcode);
-            batch.delete(ref);
-          });
-          await batch.commit();
+          for (let i = 0; i < order.items.length; i += 400) {
+            const chunk = order.items.slice(i, i + 400);
+            const batch = writeBatch(db);
+            chunk.forEach((it) => {
+              if (!it.barcode) return;
+              const ref = doc(db, "orderStatuses", getOrderStatusDocId(it.barcode));
+              batch.delete(ref);
+            });
+            await batch.commit();
+          }
         }
 
         if (editingOrder && editingOrder.id === order.id) {
@@ -480,12 +493,16 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
       } else if (actionType === "delete") {
         await deleteDoc(doc(db, "purchaseOrders", order.id));
         if (order.status === "confirm") {
-          const batch = writeBatch(db);
-          order.items.forEach((it) => {
-            const ref = doc(db, "orderStatuses", it.barcode);
-            batch.delete(ref);
-          });
-          await batch.commit();
+          for (let i = 0; i < order.items.length; i += 400) {
+            const chunk = order.items.slice(i, i + 400);
+            const batch = writeBatch(db);
+            chunk.forEach((it) => {
+              if (!it.barcode) return;
+              const ref = doc(db, "orderStatuses", getOrderStatusDocId(it.barcode));
+              batch.delete(ref);
+            });
+            await batch.commit();
+          }
         }
         if (editingOrder && editingOrder.id === order.id) {
           setEditingOrder(null);

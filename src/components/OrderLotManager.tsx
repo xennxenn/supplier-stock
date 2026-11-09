@@ -44,8 +44,9 @@ export const OrderLotManager: React.FC<OrderLotManagerProps> = ({
   const lotStats = useMemo(() => {
     const counts = new Map<string, number>();
     orderStatuses.forEach((s) => {
-      if (s.isOrdered) {
-        const lot = s.lotNumber && s.lotNumber.trim() !== "" ? s.lotNumber.trim() : "ไม่ระบุ Lot";
+      if (s && s.isOrdered) {
+        const rawLot = typeof s.lotNumber === "string" ? s.lotNumber : String(s.lotNumber || "");
+        const lot = rawLot.trim() !== "" ? rawLot.trim() : "ไม่ระบุ Lot";
         counts.set(lot, (counts.get(lot) || 0) + 1);
       }
     });
@@ -57,7 +58,7 @@ export const OrderLotManager: React.FC<OrderLotManagerProps> = ({
   }, [lotStats]);
 
   const totalOrderedItems = useMemo(() => {
-    return orderStatuses.filter((s) => s.isOrdered).length;
+    return orderStatuses.filter((s) => s && s.isOrdered).length;
   }, [orderStatuses]);
 
   const effectiveSelectedLot = useMemo(() => {
@@ -72,7 +73,7 @@ export const OrderLotManager: React.FC<OrderLotManagerProps> = ({
   }, [selectedLotToClear, uniqueLots, activeLotNumber]);
 
   const isCurrentActiveSaved =
-    Boolean(activeLotNumber) && activeLotNumber === lotInput.trim();
+    Boolean(activeLotNumber) && activeLotNumber === String(lotInput || "").trim();
 
   return (
     <>

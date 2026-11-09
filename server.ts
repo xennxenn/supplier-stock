@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import zlib from "zlib";
 import { createServer as createViteServer } from "vite";
 import Papa from "papaparse";
 import type { StockItem, Transaction, SheetsSyncData, Employee, BackupEntry } from "./src/types";
@@ -116,6 +117,7 @@ const EMPLOYEES_FILE = path.join(DATA_DIR, "employees.json");
 const TX_FILE = path.join(DATA_DIR, "custom_transactions.json");
 const BACKUPS_FILE = path.join(DATA_DIR, "backups.json");
 const ORDER_STATUS_FILE = path.join(DATA_DIR, "order_status.json");
+const SHEETS_CACHE_FILE = path.join(DATA_DIR, "sheets_cache.json");
 
 const DEFAULT_EMPLOYEES: Employee[] = [
   {
@@ -322,19 +324,58 @@ async function saveStoredEmployees(emps: Employee[]) {
 }
 
 async function getStoredCustomTransactions(): Promise<Transaction[]> {
+  const map = new Map<string, Transaction>();
+  // 1. Read local disk file first
+  if (fs.existsSync(TX_FILE)) {
+    try {
+      const raw = fs.readFileSync(TX_FILE, "utf-8");
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        for (const item of list) {
+          if (item && item.id) map.set(item.id, item as Transaction);
+        }
+      }
+    } catch (e) {
+      console.warn("Could not read TX_FILE:", e);
+    }
+  }
+  // 2. Merge from Firestore customTransactions collection
   try {
-    const q = query(collection(db, "customTransactions"), orderBy("timestamp", "desc"), limit(5000));
-    const snap = await getDocs(q);
-    return snap.docs.map(doc => doc.data() as Transaction);
+    const snap = await getDocs(collection(db, "customTransactions"));
+    snap.docs.forEach((d) => {
+      const data = d.data() as Transaction;
+      if (data && data.id) map.set(data.id, data);
+    });
   } catch (err) {
     console.error("Failed to read custom transactions from Firestore:", err);
-    return [];
   }
+  return Array.from(map.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 
 async function appendStoredCustomTransaction(tx: Transaction) {
   try {
-    await setDoc(doc(db, "customTransactions", tx.id), tx);
+    let existing: Transaction[] = [];
+    if (fs.existsSync(TX_FILE)) {
+      try {
+        existing = JSON.parse(fs.readFileSync(TX_FILE, "utf-8")) || [];
+      } catch {}
+    }
+    const filtered = existing.filter((item) => item.id !== tx.id);
+    filtered.unshift(tx);
+    fs.writeFileSync(TX_FILE, JSON.stringify(filtered.slice(0, 5000), null, 2), "utf-8");
+  } catch (fsErr) {
+    console.warn("Failed to write custom transaction to disk:", fsErr);
+  }
+
+  try {
+    const payload = {
+      ...tx,
+      itemCode: tx.barcode,
+      qty: tx.qtyIn > 0 ? tx.qtyIn : tx.qtyOut,
+      type: tx.qtyIn > 0 ? "in" : "out",
+      timestamp: tx.timestamp || Date.now(),
+    };
+    await setDoc(doc(db, "customTransactions", tx.id), payload);
   } catch (err) {
     console.error("Failed to write custom transaction to Firestore:", err);
   }
@@ -402,7 +443,13 @@ async function getStoredOrderStatus(): Promise<OrderStatus[]> {
   }
 }
 
-app.get("/api/order-status", async (req, res) => {
+function safeOrderStatusDocId(barcode: string): string {
+  const clean = String(barcode || "").trim();
+  if (!clean) return "unknown_barcode";
+  return clean.replace(/\//g, "_SLASH_");
+}
+
+app.get("/api/order-status", async (_req, res) => {
   res.json({ success: true, statuses: await getStoredOrderStatus() });
 });
 
@@ -410,20 +457,22 @@ app.post("/api/order-status", rateLimiter(40), async (req, res) => {
   try {
     const { barcode, isOrdered, lotNumber } = req.body;
     if (!barcode) return res.status(400).json({ success: false, error: "Missing barcode" });
+    const cleanCode = String(barcode).trim();
+    const docId = safeOrderStatusDocId(cleanCode);
     const statuses = await getStoredOrderStatus();
-    const idx = statuses.findIndex((s) => s.barcode === barcode);
+    const idx = statuses.findIndex((s) => String(s.barcode || "").trim() === cleanCode);
     if (!isOrdered) {
       if (idx >= 0) {
         statuses.splice(idx, 1);
       }
       try {
-        await deleteDoc(doc(db, "orderStatuses", barcode));
+        await deleteDoc(doc(db, "orderStatuses", docId));
       } catch (e) {
         console.warn("Delete order status doc error:", e);
       }
     } else {
       const entry: OrderStatus = {
-        barcode,
+        barcode: cleanCode,
         isOrdered: true,
         lotNumber: String(lotNumber || ""),
         updatedAt: new Date().toISOString(),
@@ -433,7 +482,7 @@ app.post("/api/order-status", rateLimiter(40), async (req, res) => {
       } else {
         statuses.push(entry);
       }
-      await setDoc(doc(db, "orderStatuses", barcode), entry);
+      await setDoc(doc(db, "orderStatuses", docId), entry);
     }
     res.json({ success: true, statuses });
   } catch (err) {
@@ -450,33 +499,40 @@ app.post("/api/order-status-batch", rateLimiter(40), async (req, res) => {
       const cleanTarget = String(lotNumber).trim().toLowerCase();
       const isMatch = (s: OrderStatus) => {
         if (cleanTarget === "__all__") return true;
+        const sLot = String(s.lotNumber || "").trim();
         if (cleanTarget === "ไม่ระบุ lot" || cleanTarget === "unspecified") {
-          return !s.lotNumber || s.lotNumber.trim() === "";
+          return !sLot;
         }
-        return (s.lotNumber || "").trim().toLowerCase() === cleanTarget;
+        return sLot.toLowerCase() === cleanTarget;
       };
 
       const toClear = statuses.filter(isMatch);
       for (let i = 0; i < toClear.length; i += 400) {
         const chunk = toClear.slice(i, i + 400);
         const batch = writeBatch(db);
-        chunk.forEach(s => {
-          batch.delete(doc(db, "orderStatuses", s.barcode));
+        chunk.forEach((s) => {
+          if (s.barcode) {
+            batch.delete(doc(db, "orderStatuses", safeOrderStatusDocId(s.barcode)));
+          }
         });
         await batch.commit();
       }
-      const remaining = statuses.filter(s => !isMatch(s));
+      const remaining = statuses.filter((s) => !isMatch(s));
       res.json({ success: true, statuses: remaining });
     } else {
       const cleanTarget = String(lotNumber).trim().toLowerCase();
-      const toUpdate = statuses.filter(s => (s.lotNumber || "").trim().toLowerCase() === cleanTarget);
+      const toUpdate = statuses.filter(
+        (s) => String(s.lotNumber || "").trim().toLowerCase() === cleanTarget
+      );
       for (let i = 0; i < toUpdate.length; i += 400) {
         const chunk = toUpdate.slice(i, i + 400);
         const batch = writeBatch(db);
-        chunk.forEach(s => {
-          s.isOrdered = true;
-          s.updatedAt = new Date().toISOString();
-          batch.set(doc(db, "orderStatuses", s.barcode), s);
+        chunk.forEach((s) => {
+          if (s.barcode) {
+            s.isOrdered = true;
+            s.updatedAt = new Date().toISOString();
+            batch.set(doc(db, "orderStatuses", safeOrderStatusDocId(s.barcode)), s);
+          }
         });
         await batch.commit();
       }
@@ -488,11 +544,41 @@ app.post("/api/order-status-batch", rateLimiter(40), async (req, res) => {
 });
 
 
-// In-memory cache
+// In-memory cache & pre-compressed gzip buffer
 let cachedData: SheetsSyncData | null = null;
+let cachedGzipBuffer: Buffer | null = null;
 let allTransactionsCache: Transaction[] = [];
 let lastSyncTimestamp = 0;
+let activeRefreshPromise: Promise<SheetsSyncData> | null = null;
 const CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
+
+function updateMemoryAndDiskCache(syncResult: SheetsSyncData, saveDisk = true) {
+  cachedData = syncResult;
+  allTransactionsCache = syncResult.recentTransactions || [];
+  lastSyncTimestamp = Date.now();
+  try {
+    const jsonStr = JSON.stringify(syncResult);
+    cachedGzipBuffer = zlib.gzipSync(Buffer.from(jsonStr, "utf-8"), { level: 1 });
+    if (saveDisk) {
+      fs.promises.writeFile(SHEETS_CACHE_FILE, jsonStr, "utf-8").catch(() => {});
+    }
+  } catch (e) {
+    console.warn("Could not compress/write cache:", e);
+  }
+}
+
+// Load disk cache immediately on module initialization for 0ms cold start
+if (fs.existsSync(SHEETS_CACHE_FILE)) {
+  try {
+    const raw = fs.readFileSync(SHEETS_CACHE_FILE, "utf-8");
+    const parsed = JSON.parse(raw) as SheetsSyncData;
+    if (parsed && parsed.stockItems?.length > 0 && parsed.recentTransactions?.length > 0) {
+      updateMemoryAndDiskCache(parsed, false);
+    }
+  } catch (e) {
+    console.warn("Failed to load initial SHEETS_CACHE_FILE:", e);
+  }
+}
 
 const parseNum = (val: unknown): number => {
   if (val === null || val === undefined) return 0;
@@ -501,300 +587,387 @@ const parseNum = (val: unknown): number => {
   return Number(clean);
 };
 
+const THAI_MONTHS_LIST = [
+  "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+  "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค.",
+];
+
+function parseSheetDate(dateStr: string, rawMonth: number, rawYear: number): { timestamp: number; month: number; year: number } {
+  let y = rawYear > 2400 ? rawYear - 543 : rawYear;
+  let m = rawMonth >= 1 && rawMonth <= 12 ? rawMonth : 0;
+  let d = 1;
+
+  if (dateStr) {
+    const str = dateStr.trim();
+    if (str.includes("-")) {
+      const parts = str.split(" ")[0].split("-");
+      if (parts.length === 3) {
+        if (parts[0].length === 4) {
+          const py = parseInt(parts[0], 10);
+          const pm = parseInt(parts[1], 10);
+          const pd = parseInt(parts[2], 10);
+          if (!isNaN(py)) y = py > 2400 ? py - 543 : py;
+          if (!isNaN(pm) && pm >= 1 && pm <= 12) m = pm;
+          if (!isNaN(pd) && pd >= 1 && pd <= 31) d = pd;
+        } else {
+          const pd = parseInt(parts[0], 10);
+          const pmNum = parseInt(parts[1], 10);
+          const pmIdx = !isNaN(pmNum) ? pmNum : THAI_MONTHS_LIST.findIndex((tm) => parts[1].includes(tm)) + 1;
+          let py = parseInt(parts[2], 10);
+          if (!isNaN(pd) && pd >= 1 && pd <= 31) d = pd;
+          if (pmIdx >= 1 && pmIdx <= 12) m = pmIdx;
+          if (!isNaN(py)) {
+            if (py < 100) py += py >= 50 ? 2500 : 2000;
+            if (py > 2400) py -= 543;
+            y = py;
+          }
+        }
+      }
+    } else if (str.includes("/")) {
+      const parts = str.split(" ")[0].split("/");
+      if (parts.length === 3) {
+        const pd = parseInt(parts[0], 10);
+        const pmNum = parseInt(parts[1], 10);
+        const pmIdx = !isNaN(pmNum) ? pmNum : THAI_MONTHS_LIST.findIndex((tm) => parts[1].includes(tm)) + 1;
+        let py = parseInt(parts[2], 10);
+        if (!isNaN(pd) && pd >= 1 && pd <= 31) d = pd;
+        if (pmIdx >= 1 && pmIdx <= 12) m = pmIdx;
+        if (!isNaN(py)) {
+          if (py < 100) py += py >= 50 ? 2500 : 2000;
+          if (py > 2400) py -= 543;
+          y = py;
+        }
+      }
+    }
+  }
+
+  if (y < 2000 || y > 2100) y = 0;
+  const timestamp = y > 0 && m >= 1 && m <= 12 ? new Date(y, m - 1, d).getTime() : 0;
+  return { timestamp, month: m, year: y };
+}
+
 async function fetchAndParseSheets(force = false): Promise<SheetsSyncData> {
   const now = Date.now();
   if (!force && cachedData && now - lastSyncTimestamp < CACHE_TTL_MS) {
     return cachedData;
   }
 
-  // Fetch both CSVs concurrently
-  const [resStock, resTx] = await Promise.all([
-    fetch(STOCK_SHEET_URL),
-    fetch(TRANSACTIONS_SHEET_URL),
-  ]);
-
-  if (!resStock.ok) {
-    throw new Error(`Failed to fetch Stock Sheet: HTTP ${resStock.status}`);
-  }
-  if (!resTx.ok) {
-    throw new Error(`Failed to fetch Transactions Sheet: HTTP ${resTx.status}`);
+  if (activeRefreshPromise) {
+    return activeRefreshPromise;
   }
 
-  const [textStock, textTx] = await Promise.all([
-    resStock.text(),
-    resTx.text(),
-  ]);
+  activeRefreshPromise = (async () => {
+    try {
+      // Fetch both CSVs concurrently
+      const [resStock, resTx] = await Promise.all([
+        fetch(STOCK_SHEET_URL),
+        fetch(TRANSACTIONS_SHEET_URL),
+      ]);
 
-  // Parse Stock Items
-  const parsedStock = Papa.parse<string[]>(textStock, {
-    header: false,
-    skipEmptyLines: true,
-  });
-  const stockRows = parsedStock.data.slice(1);
-
-  const stockItems: StockItem[] = stockRows
-    .map((r, index) => {
-      const barcode = (r[0] || "").trim();
-      const name = (r[1] || "").trim();
-      const category = (r[2] || "อื่นๆ").trim() || "อื่นๆ";
-      const unit = (r[3] || "").trim();
-      const line = (r[4] || "").trim();
-      const forwardBalance = parseNum(r[5]);
-      const currentBalance = parseNum(r[6]);
-      const minStock = parseNum(r[7]);
-      const unitCost = parseNum(r[8]);
-      const image = (r[9] || "").trim();
-      const master = (r[10] || "").trim();
-      const supplier = (r[11] || "").trim();
-      const note = (r[12] || "").trim();
-      const location = (r[13] || "").trim();
-
-      let status: "ok" | "low" | "out" | "reorder" = "ok";
-      if (currentBalance <= 0) {
-        status = "out";
-      } else if (currentBalance <= minStock) {
-        status = "low";
+      if (!resStock.ok) {
+        throw new Error(`Failed to fetch Stock Sheet: HTTP ${resStock.status}`);
+      }
+      if (!resTx.ok) {
+        throw new Error(`Failed to fetch Transactions Sheet: HTTP ${resTx.status}`);
       }
 
-      return {
-        id: `stk_${barcode || index}_${index}`,
-        barcode,
-        name,
-        category,
-        unit,
-        line,
-        forwardBalance,
-        currentBalance,
-        qty: currentBalance,
-        minStock,
-        unitCost,
-        image,
-        master,
-        supplier,
-        note,
-        location,
-        status,
-        updatedAt: new Date().toISOString(),
-      };
-    })
-    .filter((i) => i.barcode !== "" || i.name !== "");
+      const [textStock, textTx] = await Promise.all([
+        resStock.text(),
+        resTx.text(),
+      ]);
 
-  // Parse Transactions
-  const parsedTx = Papa.parse<string[]>(textTx, {
-    header: false,
-    skipEmptyLines: true,
-  });
-  const txRows = parsedTx.data.slice(1);
+      // Parse Stock Items
+      const parsedStock = Papa.parse<string[]>(textStock, {
+        header: false,
+        skipEmptyLines: true,
+      });
+      const stockRows = parsedStock.data.slice(1);
 
-  const transactions: Transaction[] = txRows
-    .map((r, index) => {
-      const date = (r[0] || "").trim();
-      const barcode = (r[1] || "").trim();
-      const itemName = (r[2] || "").trim();
-      const unit = (r[3] || "").trim();
-      const qtyIn = parseNum(r[4]);
-      const qtyOut = parseNum(r[5]);
-      const employeeId = (r[6] || "").trim();
-      const employeeName = (r[7] || "").trim();
-      const line = (r[8] || "").trim();
-      const unitPrice = parseNum(r[9]);
-      const totalCost = parseNum(r[10]);
-      const month = parseNum(r[11]);
-      const year = parseNum(r[12]);
-      const balance = parseNum(r[13]);
-      const minStock = parseNum(r[14]);
-      const status = (r[15] || "").trim();
+      const stockItems: StockItem[] = stockRows
+        .map((r, index) => {
+          const barcode = (r[0] || "").trim();
+          const name = (r[1] || "").trim();
+          const category = (r[2] || "อื่นๆ").trim() || "อื่นๆ";
+          const unit = (r[3] || "").trim();
+          const line = (r[4] || "").trim();
+          const forwardBalance = parseNum(r[5]);
+          const currentBalance = parseNum(r[6]);
+          const minStock = parseNum(r[7]);
+          const unitCost = parseNum(r[8]);
+          const image = (r[9] || "").trim();
+          const master = (r[10] || "").trim();
+          const supplier = (r[11] || "").trim();
+          const note = (r[12] || "").trim();
+          const location = (r[13] || "").trim();
 
-      const type: "in" | "out" = qtyIn > 0 ? "in" : "out";
+          let status: "ok" | "low" | "out" | "reorder" = "ok";
+          if (currentBalance <= 0) {
+            status = "out";
+          } else if (currentBalance <= minStock) {
+            status = "low";
+          }
 
-      return {
-        id: `tx_${index}`,
-        date,
-        barcode,
-        itemName,
-        unit,
-        qtyIn,
-        qtyOut,
-        employeeId,
-        employeeName,
-        line,
-        unitPrice,
-        totalCost,
-        month,
-        year,
-        balance,
-        minStock,
-        status,
-        type,
-      };
-    })
-    .filter((t) => t.barcode !== "" || t.itemName !== "" || t.date !== "");
+          return {
+            id: `stk_${barcode || index}_${index}`,
+            barcode,
+            name,
+            category,
+            unit,
+            line,
+            forwardBalance,
+            currentBalance,
+            qty: currentBalance,
+            minStock,
+            unitCost,
+            image,
+            master,
+            supplier,
+            note,
+            location,
+            status,
+            updatedAt: new Date().toISOString(),
+          };
+        })
+        .filter((i) => i.barcode !== "" || i.name !== "");
 
-  // Load custom transactions that were recorded via the web application
-  const storedCustomTxs = await getStoredCustomTransactions();
-  
-  // Merge custom transactions (avoid duplicates)
-  const existingTxIds = new Set(transactions.map((t) => t.id));
-  for (const cTx of storedCustomTxs) {
-    if (!existingTxIds.has(cTx.id)) {
-      transactions.unshift(cTx);
-      existingTxIds.add(cTx.id);
+      // Parse Transactions
+      const parsedTx = Papa.parse<string[]>(textTx, {
+        header: false,
+        skipEmptyLines: true,
+      });
+      const txRows = parsedTx.data.slice(1);
 
-      // Adjust stock item balance for custom transactions
-      const targetItem = stockItems.find(
-        (it) => it.barcode.trim().toLowerCase() === cTx.barcode.trim().toLowerCase()
-      );
-      if (targetItem) {
-        if (cTx.qtyIn > 0) {
-          targetItem.currentBalance += cTx.qtyIn;
-          targetItem.qty = targetItem.currentBalance;
-        } else if (cTx.qtyOut > 0) {
-          targetItem.currentBalance -= cTx.qtyOut;
-          targetItem.qty = targetItem.currentBalance;
+      const transactions: Transaction[] = [];
+      for (let index = 0; index < txRows.length; index++) {
+        const r = txRows[index];
+        const date = (r[0] || "").trim();
+        const barcode = (r[1] || "").trim();
+        const itemName = (r[2] || "").trim();
+        const qtyIn = parseNum(r[4]);
+        const qtyOut = parseNum(r[5]);
+
+        // Skip empty formula template rows at the bottom of the sheet
+        if ((qtyIn <= 0 && qtyOut <= 0) || !barcode || barcode === "0") {
+          continue;
         }
-        if (targetItem.currentBalance <= 0) targetItem.status = "out";
-        else if (targetItem.currentBalance <= targetItem.minStock) targetItem.status = "low";
-        else targetItem.status = "ok";
+
+        const unit = (r[3] || "").trim();
+        const employeeId = (r[6] || "").trim();
+        const employeeName = (r[7] || "").trim();
+        const line = (r[8] || "").trim();
+        const unitPrice = parseNum(r[9]);
+        const totalCost = parseNum(r[10]);
+        const rawMonth = parseNum(r[11]);
+        const rawYear = parseNum(r[12]);
+        const balance = parseNum(r[13]);
+        const minStock = parseNum(r[14]);
+        const status = (r[15] || "").trim();
+
+        const { timestamp, month, year } = parseSheetDate(date, rawMonth, rawYear);
+        const type: "in" | "out" = qtyIn > 0 ? "in" : "out";
+
+        transactions.push({
+          id: `tx_${index}`,
+          date,
+          barcode,
+          itemName,
+          unit,
+          qtyIn,
+          qtyOut,
+          employeeId,
+          employeeName,
+          line,
+          unitPrice,
+          totalCost,
+          month,
+          year,
+          balance,
+          minStock,
+          status,
+          type,
+          timestamp: timestamp + index * 0.001, // Preserve chronological row order within same date
+        });
       }
-    }
-  }
 
-  allTransactionsCache = transactions;
+      // Sort newest-first so recentTransactions[0] is the latest transaction
+      transactions.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
-  // Compute aggregate statistics
-  const totalValue = stockItems.reduce(
-    (sum, item) => sum + item.currentBalance * item.unitCost,
-    0
-  );
-  const lowStockCount = stockItems.filter(
-    (i) => i.currentBalance <= i.minStock && i.currentBalance > 0
-  ).length;
-  const outOfStockCount = stockItems.filter(
-    (i) => i.currentBalance <= 0
-  ).length;
+      // Load custom transactions that were recorded via the web application
+      const storedCustomTxs = await getStoredCustomTransactions();
 
-  const uniqueLines = Array.from(
-    new Set(stockItems.map((i) => i.line).filter(Boolean))
-  ).sort();
-  const uniqueCategories = Array.from(
-    new Set(stockItems.map((i) => i.category).filter(Boolean))
-  ).sort();
-  const uniqueSuppliers = Array.from(
-    new Set(stockItems.map((i) => i.supplier).filter(Boolean))
-  ).sort();
+      // Merge custom transactions (avoid duplicates)
+      const existingTxIds = new Set(transactions.map((t) => t.id));
+      for (const cTx of storedCustomTxs) {
+        if (!existingTxIds.has(cTx.id)) {
+          if (!cTx.timestamp) {
+            const parsed = parseSheetDate(cTx.date, cTx.month, cTx.year);
+            cTx.timestamp = parsed.timestamp || Date.now();
+          }
+          transactions.unshift(cTx);
+          existingTxIds.add(cTx.id);
 
-  // Line distribution
-  const lineMap = new Map<
-    string,
-    { itemCount: number; totalValue: number; outQty: number }
-  >();
-  for (const item of stockItems) {
-    const l = item.line || "ไม่ระบุ";
-    const cur = lineMap.get(l) || { itemCount: 0, totalValue: 0, outQty: 0 };
-    cur.itemCount += 1;
-    cur.totalValue += item.currentBalance * item.unitCost;
-    lineMap.set(l, cur);
-  }
-
-  // Monthly summary from transactions (most recent 6 months)
-  const monthMap = new Map<
-    string,
-    { inQty: number; outQty: number; cost: number }
-  >();
-  let currentMonthOutQty = 0;
-  let currentMonthCost = 0;
-
-  // Take most recent month found in data
-  const latestTx = transactions[0];
-  const targetYear = latestTx?.year || new Date().getFullYear();
-  const targetMonth = latestTx?.month || new Date().getMonth() + 1;
-
-  for (const t of transactions) {
-    if (t.month && t.year) {
-      const key = `${t.year}-${String(t.month).padStart(2, "0")}`;
-      const cur = monthMap.get(key) || { inQty: 0, outQty: 0, cost: 0 };
-      cur.inQty += t.qtyIn;
-      cur.outQty += t.qtyOut;
-      cur.cost += t.totalCost;
-      monthMap.set(key, cur);
-
-      if (t.year === targetYear && t.month === targetMonth) {
-        currentMonthOutQty += t.qtyOut;
-        currentMonthCost += t.totalCost;
+          // Adjust stock item balance for custom transactions
+          const targetItem = stockItems.find(
+            (it) => it.barcode.trim().toLowerCase() === cTx.barcode.trim().toLowerCase()
+          );
+          if (targetItem) {
+            if (cTx.qtyIn > 0) {
+              targetItem.currentBalance += cTx.qtyIn;
+              targetItem.qty = targetItem.currentBalance;
+            } else if (cTx.qtyOut > 0) {
+              targetItem.currentBalance -= cTx.qtyOut;
+              targetItem.qty = targetItem.currentBalance;
+            }
+            if (targetItem.currentBalance <= 0) targetItem.status = "out";
+            else if (targetItem.currentBalance <= targetItem.minStock) targetItem.status = "low";
+            else targetItem.status = "ok";
+          }
+        }
       }
+
+      // Compute aggregate statistics
+      const totalValue = stockItems.reduce(
+        (sum, item) => sum + item.currentBalance * item.unitCost,
+        0
+      );
+      const lowStockCount = stockItems.filter(
+        (i) => i.currentBalance <= i.minStock && i.currentBalance > 0
+      ).length;
+      const outOfStockCount = stockItems.filter(
+        (i) => i.currentBalance <= 0
+      ).length;
+
+      const uniqueLines = Array.from(
+        new Set(stockItems.map((i) => i.line).filter(Boolean))
+      ).sort();
+      const uniqueCategories = Array.from(
+        new Set(stockItems.map((i) => i.category).filter(Boolean))
+      ).sort();
+      const uniqueSuppliers = Array.from(
+        new Set(stockItems.map((i) => i.supplier).filter(Boolean))
+      ).sort();
+
+      // Line distribution
+      const lineMap = new Map<
+        string,
+        { itemCount: number; totalValue: number; outQty: number }
+      >();
+      for (const item of stockItems) {
+        const l = item.line || "ไม่ระบุ";
+        const cur = lineMap.get(l) || { itemCount: 0, totalValue: 0, outQty: 0 };
+        cur.itemCount += 1;
+        cur.totalValue += item.currentBalance * item.unitCost;
+        lineMap.set(l, cur);
+      }
+
+      // Monthly summary from transactions
+      const monthMap = new Map<
+        string,
+        { inQty: number; outQty: number; cost: number }
+      >();
+      let currentMonthOutQty = 0;
+      let currentMonthCost = 0;
+
+      // Take most recent month found in data (transactions[0] is now newest)
+      const latestTx = transactions[0];
+      const targetYear = latestTx?.year || new Date().getFullYear();
+      const targetMonth = latestTx?.month || new Date().getMonth() + 1;
+
+      for (const t of transactions) {
+        if (t.month && t.year) {
+          const key = `${t.year}-${String(t.month).padStart(2, "0")}`;
+          const cur = monthMap.get(key) || { inQty: 0, outQty: 0, cost: 0 };
+          cur.inQty += t.qtyIn;
+          cur.outQty += t.qtyOut;
+          cur.cost += t.totalCost;
+          monthMap.set(key, cur);
+
+          if (t.year === targetYear && t.month === targetMonth) {
+            currentMonthOutQty += t.qtyOut;
+            currentMonthCost += t.totalCost;
+          }
+        }
+      }
+
+      const monthlySummary = Array.from(monthMap.entries())
+        .sort((a, b) => b[0].localeCompare(a[0]))
+        .slice(0, 8)
+        .reverse()
+        .map(([monthLabel, data]) => ({
+          monthLabel,
+          inQty: data.inQty,
+          outQty: data.outQty,
+          cost: Math.round(data.cost),
+        }));
+
+      const lineDistribution = Array.from(lineMap.entries()).map(
+        ([line, data]) => ({
+          line,
+          itemCount: data.itemCount,
+          totalValue: Math.round(data.totalValue),
+          outQty: data.outQty,
+        })
+      );
+
+      // Category distribution
+      const catMap = new Map<string, { itemCount: number; totalValue: number }>();
+      for (const item of stockItems) {
+        const c = item.category || "อื่นๆ";
+        const cur = catMap.get(c) || { itemCount: 0, totalValue: 0 };
+        cur.itemCount += 1;
+        cur.totalValue += item.currentBalance * item.unitCost;
+        catMap.set(c, cur);
+      }
+      const categoryDistribution = Array.from(catMap.entries()).map(
+        ([category, data]) => ({
+          category,
+          itemCount: data.itemCount,
+          totalValue: Math.round(data.totalValue),
+        })
+      );
+
+      const syncResult: SheetsSyncData = {
+        success: true,
+        syncedAt: new Date().toISOString(),
+        totalStockItems: stockItems.length,
+        totalTransactions: transactions.length,
+        stockItems,
+        recentTransactions: transactions,
+        stats: {
+          totalValue: Math.round(totalValue),
+          totalSkus: stockItems.length,
+          lowStockCount,
+          outOfStockCount,
+          currentMonthOutQty,
+          currentMonthCost: Math.round(currentMonthCost),
+          uniqueLines,
+          uniqueCategories,
+          uniqueSuppliers,
+          monthlySummary,
+          lineDistribution,
+          categoryDistribution,
+        },
+        sourceUrls: {
+          stockSheet: STOCK_SHEET_URL,
+          transactionsSheet: TRANSACTIONS_SHEET_URL,
+        },
+      };
+
+      updateMemoryAndDiskCache(syncResult, true);
+      return syncResult;
+    } finally {
+      activeRefreshPromise = null;
     }
-  }
+  })();
 
-  const monthlySummary = Array.from(monthMap.entries())
-    .sort((a, b) => b[0].localeCompare(a[0]))
-    .slice(0, 8)
-    .reverse()
-    .map(([monthLabel, data]) => ({
-      monthLabel,
-      inQty: data.inQty,
-      outQty: data.outQty,
-      cost: Math.round(data.cost),
-    }));
-
-  const lineDistribution = Array.from(lineMap.entries()).map(
-    ([line, data]) => ({
-      line,
-      itemCount: data.itemCount,
-      totalValue: Math.round(data.totalValue),
-      outQty: data.outQty,
-    })
-  );
-
-  // Category distribution
-  const catMap = new Map<string, { itemCount: number; totalValue: number }>();
-  for (const item of stockItems) {
-    const c = item.category || "อื่นๆ";
-    const cur = catMap.get(c) || { itemCount: 0, totalValue: 0 };
-    cur.itemCount += 1;
-    cur.totalValue += item.currentBalance * item.unitCost;
-    catMap.set(c, cur);
-  }
-  const categoryDistribution = Array.from(catMap.entries()).map(
-    ([category, data]) => ({
-      category,
-      itemCount: data.itemCount,
-      totalValue: Math.round(data.totalValue),
-    })
-  );
-
-  const recentTransactions = transactions;
-
-  const syncResult: SheetsSyncData = {
-    success: true,
-    syncedAt: new Date().toISOString(),
-    totalStockItems: stockItems.length,
-    totalTransactions: transactions.length,
-    stockItems,
-    recentTransactions,
-    stats: {
-      totalValue: Math.round(totalValue),
-      totalSkus: stockItems.length,
-      lowStockCount,
-      outOfStockCount,
-      currentMonthOutQty,
-      currentMonthCost: Math.round(currentMonthCost),
-      uniqueLines,
-      uniqueCategories,
-      uniqueSuppliers,
-      monthlySummary,
-      lineDistribution,
-      categoryDistribution,
-    },
-    sourceUrls: {
-      stockSheet: STOCK_SHEET_URL,
-      transactionsSheet: TRANSACTIONS_SHEET_URL,
-    },
-  };
-
-  cachedData = syncResult;
-  lastSyncTimestamp = now;
-  return syncResult;
+  return activeRefreshPromise;
 }
+
+// Pre-warm Google Sheets cache in the background on startup and keep warm every 90 seconds
+fetchAndParseSheets(true).catch((e) => console.warn("Initial background sheets warm-up failed:", e));
+setInterval(() => {
+  fetchAndParseSheets(true).catch((e) => console.warn("Background sheets refresh failed:", e));
+}, 90 * 1000);
 
 // ---------------- API Routes ----------------
 
@@ -806,14 +979,38 @@ app.get("/api/health", rateLimiter(120), (_req, res) => {
   });
 });
 
-// Sync data from Google Sheets
-app.get("/api/sync-sheets", rateLimiter(60), async (req, res) => {
+// Sync data from Google Sheets (Instant Stale-While-Revalidate + Pre-computed Gzip)
+app.get("/api/sync-sheets", rateLimiter(120), async (req, res) => {
   try {
     const force = req.query.force === "true" || req.query.refresh === "1";
+
+    // If not forced and we already have cached data in memory, serve immediately (<2ms)!
+    if (!force && cachedData) {
+      if (Date.now() - lastSyncTimestamp >= CACHE_TTL_MS) {
+        fetchAndParseSheets(true).catch(() => {});
+      }
+      const acceptEncoding = String(req.headers["accept-encoding"] || "");
+      if (cachedGzipBuffer && acceptEncoding.includes("gzip")) {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.setHeader("Content-Encoding", "gzip");
+        return res.send(cachedGzipBuffer);
+      }
+      return res.json(cachedData);
+    }
+
     const data = await fetchAndParseSheets(force);
+    const acceptEncoding = String(req.headers["accept-encoding"] || "");
+    if (cachedGzipBuffer && acceptEncoding.includes("gzip")) {
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("Content-Encoding", "gzip");
+      return res.send(cachedGzipBuffer);
+    }
     res.json(data);
   } catch (error: any) {
     console.error("Error syncing Google Sheets:", error);
+    if (cachedData) {
+      return res.json(cachedData);
+    }
     res.status(500).json({
       success: false,
       error: error.message || "Failed to sync Google Sheets data",
@@ -938,6 +1135,7 @@ app.post("/api/transactions", rateLimiter(80), (req, res) => {
       minStock: parseNum(tx.minStock) || 0,
       status: "synced",
       type: safeQtyIn > 0 ? "in" : "out",
+      timestamp: Date.now(),
     };
 
     // Prepend to server in-memory transactions cache
@@ -971,6 +1169,7 @@ app.post("/api/transactions", rateLimiter(80), (req, res) => {
       }
       cachedData.recentTransactions = allTransactionsCache;
       cachedData.totalTransactions = allTransactionsCache.length;
+      updateMemoryAndDiskCache(cachedData, true);
     }
 
     res.json({

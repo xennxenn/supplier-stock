@@ -42,6 +42,7 @@ export interface Transaction {
   minStock: number;         // Col O: Min Stock
   status: string;           // Col P: สถานะ (เช่น 'ok', 'ต้องทำการซื้อ')
   type?: "in" | "out";
+  timestamp?: number;       // Pre-parsed numeric timestamp for fast sorting
 }
 
 export interface SheetsSyncData {

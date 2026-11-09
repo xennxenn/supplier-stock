@@ -1,6 +1,12 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useDeferredValue, useRef } from "react";
 import { doc, setDoc, onSnapshot, writeBatch, deleteDoc } from "firebase/firestore";
-import { db, orderStatusCol } from "../lib/firebase";
+import {
+  db,
+  orderStatusCol,
+  getOrderStatusDocId,
+  handleFirestoreError,
+  OperationType,
+} from "../lib/firebase";
 import {
   AlertTriangle,
   Download,
@@ -9,20 +15,26 @@ import {
   CheckCircle2,
   Package,
   Layers,
-  ArrowRight,
   Calculator,
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
   FileSpreadsheet,
-  Coins,
   Boxes,
   Calendar,
+  AlertCircle,
 } from "lucide-react";
-import type { StockItem, Employee, OrderStatus, Transaction, PurchaseOrderItem } from "../types";
+import type {
+  StockItem,
+  Employee,
+  OrderStatus,
+  Transaction,
+  PurchaseOrderItem,
+} from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
 import { matchesLineMulti, matchesExactOrTokenMulti } from "../utils/filterUtils";
+import { computeBurnRateData } from "../utils/usageUtils";
 import { OrderLotManager } from "./OrderLotManager";
 import { MultiSelectFilter } from "./MultiSelectFilter";
 
@@ -53,6 +65,9 @@ type LowStockSortField =
   | "supplier"
   | "risk";
 
+const INITIAL_BATCH = 50;
+const BATCH_INCREMENT = 60;
+
 export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
   items,
   transactions,
@@ -68,15 +83,28 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
   const canManageOrderStatus = hasPermission(currentUser, "manageOrderStatus");
 
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+
   const [selectedLines, setSelectedLines] = useState<string[]>([]);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
   const [safetyBufferPercent, setSafetyBufferPercent] = useState<number>(30); // 30% buffer over min stock
+  const [alertCriteria, setAlertCriteria] = useState<"minStock" | "includeZero">("minStock");
   const [sortField, setSortField] = useState<LowStockSortField>("estimatedCost");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
   const [orderStatuses, setOrderStatuses] = useState<OrderStatus[]>([]);
   const [filterOrderStatus, setFilterOrderStatus] = useState<"all" | "ordered" | "not_ordered">("all");
+
+  const [visibleCount, setVisibleCount] = useState<number>(INITIAL_BATCH);
+  const [showAllDirectly, setShowAllDirectly] = useState<boolean>(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  const [notice, setNotice] = useState<{ type: "ok" | "error"; text: string } | null>(null);
+  const showNotice = (text: string, type: "ok" | "error" = "error") => {
+    setNotice({ type, text });
+    setTimeout(() => setNotice(null), 4000);
+  };
 
   const [activeLotNumber, setActiveLotNumber] = useState<string>(() => {
     try {
@@ -96,39 +124,47 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
   const [selectedLotToClear, setSelectedLotToClear] = useState<string>("");
   const [isClearing, setIsClearing] = useState<boolean>(false);
 
-  const lotStats = useMemo(() => {
-    const counts = new Map<string, number>();
-    orderStatuses.forEach((s) => {
-      if (s.isOrdered) {
-        const lot = s.lotNumber && s.lotNumber.trim() !== "" ? s.lotNumber.trim() : "ไม่ระบุ Lot";
-        counts.set(lot, (counts.get(lot) || 0) + 1);
+  // O(1) lookup map for orderStatuses by barcode
+  const orderStatusMap = useMemo(() => {
+    const map = new Map<string, OrderStatus>();
+    for (let i = 0; i < orderStatuses.length; i++) {
+      const s = orderStatuses[i];
+      if (s && s.barcode) {
+        map.set(String(s.barcode).trim(), s);
       }
-    });
-    return counts;
+    }
+    return map;
   }, [orderStatuses]);
 
   useEffect(() => {
-    const unsubscribe = onSnapshot(orderStatusCol, (snapshot) => {
-      const statuses = snapshot.docs.map(doc => doc.data() as OrderStatus);
-      setOrderStatuses(statuses);
-    });
+    const unsubscribe = onSnapshot(
+      orderStatusCol,
+      (snapshot) => {
+        const statuses = snapshot.docs.map((d) => d.data() as OrderStatus);
+        setOrderStatuses(statuses);
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.LIST, "orderStatuses");
+      }
+    );
     return () => unsubscribe();
   }, []);
 
   const handleSaveActiveLot = () => {
     if (!canManageOrderStatus) {
-      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
+      showNotice("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
       return;
     }
-    const trimmed = lotInput.trim();
+    const trimmed = String(lotInput || "").trim();
     if (!trimmed) {
-      alert("กรุณาระบุ หรือเลือกเลขที่ Lot การสั่งซื้อก่อนกดบันทึก");
+      showNotice("กรุณาระบุ หรือเลือกเลขที่ Lot การสั่งซื้อก่อนกดบันทึก");
       return;
     }
     setActiveLotNumber(trimmed);
     try {
       localStorage.setItem("pasaya_active_order_lot", trimmed);
     } catch {}
+    showNotice(`บันทึกและเปิดใช้งานรอบ Lot "${trimmed}" เรียบร้อยแล้ว`, "ok");
   };
 
   const handleUnlockLot = () => {
@@ -141,65 +177,95 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
 
   const handleToggleOrderStatus = async (barcode: string, checked: boolean) => {
     if (!canManageOrderStatus) {
-      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
+      showNotice("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
       return;
     }
     if (!activeLotNumber) {
-      alert("กรุณาสร้างหรือเลือกเลขที่ Lot และกดปุ่ม 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ");
+      showNotice("กรุณาสร้างหรือเลือกเลขที่ Lot และกดปุ่ม 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ");
       return;
     }
-    try {
-      const ref = doc(db, "orderStatuses", barcode);
-      if (checked) {
-        await setDoc(ref, {
-          barcode,
+    const cleanBarcode = String(barcode || "").trim();
+    if (!cleanBarcode) return;
+
+    // Optimistic UI update
+    const updatedAt = new Date().toISOString();
+    setOrderStatuses((prev) => {
+      const without = prev.filter((s) => String(s?.barcode || "").trim() !== cleanBarcode);
+      if (!checked) return without;
+      return [
+        ...without,
+        {
+          barcode: cleanBarcode,
           isOrdered: true,
           lotNumber: activeLotNumber,
-          updatedAt: new Date().toISOString(),
+          updatedAt,
+        },
+      ];
+    });
+
+    try {
+      const ref = doc(db, "orderStatuses", getOrderStatusDocId(cleanBarcode));
+      if (checked) {
+        await setDoc(ref, {
+          barcode: cleanBarcode,
+          isOrdered: true,
+          lotNumber: activeLotNumber,
+          updatedAt,
         });
         fetch("/api/order-status", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ barcode, isOrdered: true, lotNumber: activeLotNumber }),
+          body: JSON.stringify({
+            barcode: cleanBarcode,
+            isOrdered: true,
+            lotNumber: activeLotNumber,
+          }),
         }).catch((err) => console.warn("Sync order status fallback:", err));
       } else {
         await deleteDoc(ref);
         fetch("/api/order-status", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ barcode, isOrdered: false, lotNumber: "" }),
+          body: JSON.stringify({
+            barcode: cleanBarcode,
+            isOrdered: false,
+            lotNumber: "",
+          }),
         }).catch((err) => console.warn("Sync order status fallback:", err));
       }
     } catch (err) {
       console.error("Error updating order status:", err);
-      alert("เกิดข้อผิดพลาดในการบันทึกข้อมูล กรุณาลองใหม่อีกครั้ง");
+      showNotice("เกิดข้อผิดพลาดในการบันทึกข้อมูล กรุณาลองใหม่อีกครั้ง");
     }
   };
 
   const handleClearLot = async (targetLot: string) => {
     if (!canManageOrderStatus) {
-      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบ");
+      showNotice("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบ");
       return;
     }
     if (!targetLot) return;
 
     setIsClearing(true);
     try {
-      const cleanTarget = targetLot.trim().toLowerCase();
+      const cleanTarget = String(targetLot).trim().toLowerCase();
       const isMatch = (s: OrderStatus) => {
-        if (!s.isOrdered) return false;
+        if (!s || !s.isOrdered) return false;
+        const sLot = typeof s.lotNumber === "string" ? s.lotNumber.trim() : String(s.lotNumber || "").trim();
         if (cleanTarget === "__all__") return true;
         if (cleanTarget === "ไม่ระบุ lot" || cleanTarget === "unspecified") {
-          return !s.lotNumber || s.lotNumber.trim() === "";
+          return !sLot;
         }
-        return (s.lotNumber || "").trim().toLowerCase() === cleanTarget;
+        return sLot.toLowerCase() === cleanTarget;
       };
 
       const toDelete = orderStatuses.filter(isMatch);
 
       // 1. Optimistic UI update immediately
-      const toDeleteBarcodes = new Set(toDelete.map((s) => s.barcode));
-      setOrderStatuses((prev) => prev.filter((s) => !toDeleteBarcodes.has(s.barcode)));
+      const toDeleteBarcodes = new Set(toDelete.map((s) => String(s.barcode || "").trim()));
+      setOrderStatuses((prev) =>
+        prev.filter((s) => !toDeleteBarcodes.has(String(s?.barcode || "").trim()))
+      );
 
       // 2. Delete documents in Firestore in chunks of 400
       if (toDelete.length > 0) {
@@ -207,7 +273,9 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
           const chunk = toDelete.slice(i, i + 400);
           const batch = writeBatch(db);
           chunk.forEach((s) => {
-            batch.delete(doc(db, "orderStatuses", s.barcode));
+            if (s.barcode) {
+              batch.delete(doc(db, "orderStatuses", getOrderStatusDocId(s.barcode)));
+            }
           });
           await batch.commit();
         }
@@ -223,7 +291,7 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
       // 4. Reset active lot if it was cleared
       if (
         cleanTarget === "__all__" ||
-        (activeLotNumber || "").trim().toLowerCase() === cleanTarget
+        String(activeLotNumber || "").trim().toLowerCase() === cleanTarget
       ) {
         setActiveLotNumber("");
         setLotInput("");
@@ -234,72 +302,62 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
 
       setShowClearLotModal(false);
       setSelectedLotToClear("");
+      showNotice("ล้างข้อมูลรอบการสั่งซื้อเรียบร้อยแล้ว", "ok");
     } catch (err) {
       console.error("Error clearing lot:", err);
-      alert("เกิดข้อผิดพลาดในการล้างข้อมูล Lot");
+      showNotice("เกิดข้อผิดพลาดในการล้างข้อมูล Lot");
     } finally {
       setIsClearing(false);
     }
   };
 
+  // WeakMap-cached monthly burn rate per SKU from transactions
+  const { burnRateMap } = useMemo(() => computeBurnRateData(transactions), [transactions]);
 
-  // Low stock items: where currentBalance <= minStock and minStock > 0
-  
-  // Calculate historical monthly burn rate per SKU from transactions
-  const { burnRateMap, monthsSpan } = useMemo(() => {
-    const usageMap = new Map<string, number>();
-    const monthKeySet = new Set<string>();
-
-    for (const t of transactions) {
-      if (t.qtyOut > 0) {
-        const b = t.barcode.trim().toLowerCase();
-        usageMap.set(b, (usageMap.get(b) || 0) + t.qtyOut);
-        if (t.year && t.month) {
-          monthKeySet.add(`${t.year}-${t.month}`);
-        }
-      }
-    }
-
-    const calculatedSpan = Math.max(3, monthKeySet.size || 6);
-
-    const burnRates = new Map<string, number>();
-    usageMap.forEach((totalOut, barcode) => {
-      burnRates.set(barcode, totalOut / calculatedSpan);
-    });
-
-    return { burnRateMap: burnRates, monthsSpan: calculatedSpan };
-  }, [transactions]);
-
+  // Low stock items according to selected criteria
   const lowStockItems = useMemo(() => {
-    return items.filter((it) => it.currentBalance <= it.minStock && it.minStock > 0);
+    if (alertCriteria === "includeZero") {
+      return items.filter(
+        (it) =>
+          (it.currentBalance ?? 0) <= 0 ||
+          ((it.currentBalance ?? 0) <= (it.minStock ?? 0) && (it.minStock ?? 0) > 0)
+      );
+    }
+    return items.filter(
+      (it) => (it.currentBalance ?? 0) <= (it.minStock ?? 0) && (it.minStock ?? 0) > 0
+    );
+  }, [items, alertCriteria]);
+
+  const outOfStockZeroMinCount = useMemo(() => {
+    return items.filter((it) => (it.currentBalance ?? 0) <= 0 && (it.minStock ?? 0) <= 0).length;
   }, [items]);
 
   const uniqueCategories = useMemo(() => {
     const set = new Set<string>();
     for (const it of lowStockItems) {
-      if (it.category) set.add(it.category);
+      if (it.category && it.category.trim()) set.add(it.category.trim());
     }
-    return Array.from(set).sort();
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
   }, [lowStockItems]);
 
   const uniqueSuppliers = useMemo(() => {
     const set = new Set<string>();
     for (const it of lowStockItems) {
-      if (it.supplier) set.add(it.supplier);
+      if (it.supplier && it.supplier.trim()) set.add(it.supplier.trim());
     }
-    return Array.from(set).sort();
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
   }, [lowStockItems]);
 
-  const filtered = useMemo(() => {
+  // Step 1: Filter by search, line, category, supplier (decoupled from orderStatuses)
+  const baseFiltered = useMemo(() => {
+    const q = deferredSearch.toLowerCase().trim();
     return lowStockItems.filter((it) => {
-      if (search) {
-        const q = search.toLowerCase().trim();
-        if (
-          !it.barcode.toLowerCase().includes(q) &&
-          !it.name.toLowerCase().includes(q) &&
-          !(it.supplier || "").toLowerCase().includes(q) &&
-          !(it.category || "").toLowerCase().includes(q)
-        ) {
+      if (q) {
+        const b = String(it.barcode || "").toLowerCase();
+        const n = String(it.name || "").toLowerCase();
+        const s = String(it.supplier || "").toLowerCase();
+        const c = String(it.category || "").toLowerCase();
+        if (!b.includes(q) && !n.includes(q) && !s.includes(q) && !c.includes(q)) {
           return false;
         }
       }
@@ -316,37 +374,45 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
         if (!matchesExactOrTokenMulti(it.supplier, selectedSuppliers)) return false;
       }
 
-      const oStatus = orderStatuses.find(s => s.barcode === it.barcode);
-      const isOrdered = oStatus?.isOrdered || false;
-      if (filterOrderStatus === "ordered" && !isOrdered) return false;
-      if (filterOrderStatus === "not_ordered" && isOrdered) return false;
-
       return true;
     });
-  }, [lowStockItems, search, selectedLines, selectedCategories, selectedSuppliers, filterOrderStatus, orderStatuses]);
+  }, [lowStockItems, deferredSearch, selectedLines, selectedCategories, selectedSuppliers]);
+
+  // Step 2: Only filter by orderStatusMap when filterOrderStatus !== "all"
+  const filtered = useMemo(() => {
+    if (filterOrderStatus === "all") return baseFiltered;
+    return baseFiltered.filter((it) => {
+      const oStatus = orderStatusMap.get(String(it.barcode || "").trim());
+      const isOrdered = Boolean(oStatus?.isOrdered);
+      return filterOrderStatus === "ordered" ? isOrdered : !isOrdered;
+    });
+  }, [baseFiltered, filterOrderStatus, orderStatusMap]);
 
   // Compute reorder quantities and estimated costs
   const reorderCalculations = useMemo(() => {
     const calculated = filtered.map((it) => {
-      const targetStock = Math.ceil(it.minStock * (1 + safetyBufferPercent / 100));
-      const deficit = Math.max(0, targetStock - it.currentBalance);
-      const estimatedCost = deficit * it.unitCost;
-      const percentOfMin = Math.round((it.currentBalance / (it.minStock || 1)) * 100);
-      
-      // Calculate risk similarly to Forecast Planning
-      const bKey = it.barcode.trim().toLowerCase();
+      const balance = it.currentBalance ?? 0;
+      const minStock = it.minStock ?? 0;
+      const unitCost = it.unitCost ?? 0;
+      const effectiveMin = minStock > 0 ? minStock : 1;
+      const targetStock = Math.ceil(effectiveMin * (1 + safetyBufferPercent / 100));
+      const deficit = Math.max(0, targetStock - balance);
+      const estimatedCost = deficit * unitCost;
+      const percentOfMin = minStock > 0 ? Math.round((balance / minStock) * 100) : 0;
+
+      const bKey = String(it.barcode || "").trim().toLowerCase();
       let monthlyBurnRate = burnRateMap.get(bKey) || 0;
-      if (monthlyBurnRate === 0 && it.minStock > 0) {
-        monthlyBurnRate = Math.max(0.5, it.minStock / 3);
+      if (monthlyBurnRate === 0 && minStock > 0) {
+        monthlyBurnRate = Math.max(0.5, minStock / 3);
       }
-      const monthsOfStockRemaining = monthlyBurnRate > 0 ? it.currentBalance / monthlyBurnRate : 999;
-      
+      const monthsOfStockRemaining = monthlyBurnRate > 0 ? balance / monthlyBurnRate : 999;
+
       let riskLevel: "critical" | "warning" | "ok" | "overstock" = "ok";
-      if (monthsOfStockRemaining < 1 || (it.currentBalance <= 0 && monthlyBurnRate > 0)) {
+      if (monthsOfStockRemaining < 1 || (balance <= 0 && (monthlyBurnRate > 0 || minStock >= 0))) {
         riskLevel = "critical";
-      } else if (monthsOfStockRemaining < 6) { // Default forecast horizon
+      } else if (monthsOfStockRemaining < 6) {
         riskLevel = "warning";
-      } else if (monthsOfStockRemaining > 15 && it.currentBalance > 50) {
+      } else if (monthsOfStockRemaining > 15 && balance > 50) {
         riskLevel = "overstock";
       }
 
@@ -359,58 +425,103 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
         riskLevel,
         monthsOfStockRemaining,
       };
-
     });
 
     return calculated.sort((a, b) => {
       let res = 0;
       switch (sortField) {
         case "barcode":
-          res = a.item.barcode.localeCompare(b.item.barcode);
+          res = String(a.item.barcode || "").localeCompare(String(b.item.barcode || ""));
           break;
         case "name":
-          res = a.item.name.localeCompare(b.item.name);
+          res = String(a.item.name || "").localeCompare(String(b.item.name || ""), "th");
           break;
         case "line":
-          res = (a.item.line || "").localeCompare(b.item.line || "");
+          res = String(a.item.line || "").localeCompare(String(b.item.line || ""), "th");
           break;
         case "balance":
-          res = a.item.currentBalance - b.item.currentBalance;
+          res = (a.item.currentBalance ?? 0) - (b.item.currentBalance ?? 0);
           break;
         case "minStock":
-          res = a.item.minStock - b.item.minStock;
+          res = (a.item.minStock ?? 0) - (b.item.minStock ?? 0);
           break;
         case "deficit":
           res = a.deficit - b.deficit;
           break;
         case "cost":
-          res = a.item.unitCost - b.item.unitCost;
+          res = (a.item.unitCost ?? 0) - (b.item.unitCost ?? 0);
           break;
         case "estimatedCost":
           res = a.estimatedCost - b.estimatedCost;
           break;
         case "supplier":
-          res = (a.item.supplier || "").localeCompare(b.item.supplier || "");
+          res = String(a.item.supplier || "").localeCompare(String(b.item.supplier || ""), "th");
           break;
-
-        case "risk":
+        case "risk": {
           const riskWeight = { critical: 4, warning: 3, ok: 2, overstock: 1 };
           res = riskWeight[a.riskLevel] - riskWeight[b.riskLevel];
           break;
-
+        }
         default:
           res = 0;
       }
       return sortOrder === "asc" ? res : -res;
     });
-  }, [filtered, safetyBufferPercent, sortField, sortOrder]);
+  }, [filtered, safetyBufferPercent, sortField, sortOrder, burnRateMap]);
+
+  // Reset progressive batch count when filters change
+  useEffect(() => {
+    if (!showAllDirectly) {
+      setVisibleCount(INITIAL_BATCH);
+    }
+  }, [
+    deferredSearch,
+    selectedLines,
+    selectedCategories,
+    selectedSuppliers,
+    filterOrderStatus,
+    alertCriteria,
+    sortField,
+    sortOrder,
+    showAllDirectly,
+  ]);
+
+  // Progressive infinite scroll via IntersectionObserver
+  useEffect(() => {
+    if (showAllDirectly) return;
+    const node = sentinelRef.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleCount((prev) =>
+            prev < reorderCalculations.length
+              ? Math.min(prev + BATCH_INCREMENT, reorderCalculations.length)
+              : prev
+          );
+        }
+      },
+      { rootMargin: "320px" }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [reorderCalculations.length, showAllDirectly]);
+
+  const displayedCalculations = useMemo(() => {
+    if (showAllDirectly || visibleCount >= reorderCalculations.length) {
+      return reorderCalculations;
+    }
+    return reorderCalculations.slice(0, visibleCount);
+  }, [reorderCalculations, visibleCount, showAllDirectly]);
 
   const handleHeaderSort = (field: LowStockSortField) => {
     if (sortField === field) {
       setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
     } else {
       setSortField(field);
-      if (["deficit", "estimatedCost", "minStock"].includes(field)) {
+      if (["deficit", "estimatedCost", "minStock", "risk"].includes(field)) {
         setSortOrder("desc");
       } else {
         setSortOrder("asc");
@@ -420,23 +531,26 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
 
   const renderSortIcon = (field: LowStockSortField) => {
     if (sortField !== field) {
-      return <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-40 group-hover:opacity-100 transition" />;
+      return (
+        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-40 group-hover:opacity-100 transition" />
+      );
     }
     return sortOrder === "asc" ? (
-      <ArrowUp className="w-3.5 h-3.5 text-amber-400 font-bold" />
+      <ArrowUp className="w-3.5 h-3.5 text-amber-500 font-bold" />
     ) : (
-      <ArrowDown className="w-3.5 h-3.5 text-amber-400 font-bold" />
+      <ArrowDown className="w-3.5 h-3.5 text-amber-500 font-bold" />
     );
   };
 
-  const totalEstimatedCost = useMemo(
-    () => reorderCalculations.reduce((sum, r) => sum + r.estimatedCost, 0),
-    [reorderCalculations]
-  );
-  const totalUnitsToOrder = useMemo(
-    () => reorderCalculations.reduce((sum, r) => sum + r.deficit, 0),
-    [reorderCalculations]
-  );
+  const { totalEstimatedCost, totalUnitsToOrder } = useMemo(() => {
+    let cost = 0;
+    let units = 0;
+    for (let i = 0; i < reorderCalculations.length; i++) {
+      cost += reorderCalculations[i].estimatedCost;
+      units += reorderCalculations[i].deficit;
+    }
+    return { totalEstimatedCost: cost, totalUnitsToOrder: units };
+  }, [reorderCalculations]);
 
   const getExportData = () => {
     const headers = [
@@ -460,10 +574,10 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
       r.item.category || "",
       r.item.unit || "",
       r.item.line || "",
-      r.item.currentBalance || 0,
-      r.item.minStock || 0,
+      r.item.currentBalance ?? 0,
+      r.item.minStock ?? 0,
       r.deficit || 0,
-      r.item.unitCost || 0,
+      r.item.unitCost ?? 0,
       parseFloat(r.estimatedCost.toFixed(2)),
       r.item.supplier || "",
       r.item.location || "",
@@ -489,14 +603,19 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
     if (selectedCategories.length > 0) filterParts.push(`หมวด: ${selectedCategories.join(", ")}`);
     if (selectedSuppliers.length > 0) filterParts.push(`Supplier: ${selectedSuppliers.join(", ")}`);
     if (search) filterParts.push(`ค้นหา: "${search}"`);
-    if (filterOrderStatus !== "all") filterParts.push(`สถานะ: ${filterOrderStatus === "ordered" ? "สั่งแล้ว" : "ยังไม่ได้สั่ง"}`);
-    const filterContext = filterParts.length > 0 ? filterParts.join(" | ") : "รายการที่กรองทั้งหมด";
+    if (filterOrderStatus !== "all") {
+      filterParts.push(
+        `สถานะ: ${filterOrderStatus === "ordered" ? "สั่งแล้ว" : "ยังไม่ได้สั่ง"}`
+      );
+    }
+    const filterContext =
+      filterParts.length > 0 ? filterParts.join(" | ") : "รายการที่กรองทั้งหมด";
 
     const poItems: PurchaseOrderItem[] = reorderCalculations.map((r) => {
-      const bKey = r.item.barcode.trim().toLowerCase();
+      const bKey = String(r.item.barcode || "").trim().toLowerCase();
       let burnRate = burnRateMap.get(bKey) || 0;
-      if (burnRate === 0 && r.item.minStock > 0) {
-        burnRate = Math.max(0.5, r.item.minStock / 3);
+      if (burnRate === 0 && (r.item.minStock ?? 0) > 0) {
+        burnRate = Math.max(0.5, (r.item.minStock ?? 0) / 3);
       }
 
       return {
@@ -507,9 +626,14 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
         unit: r.item.unit || "ชิ้น",
         monthlyBurnRate: parseFloat(burnRate.toFixed(1)),
         monthsOfStock: r.monthsOfStockRemaining,
-        stockStatus: r.item.currentBalance <= 0 ? "out" : r.item.currentBalance <= r.item.minStock ? "low" : "ok",
-        currentBalance: r.item.currentBalance,
-        minStock: r.item.minStock,
+        stockStatus:
+          (r.item.currentBalance ?? 0) <= 0
+            ? "out"
+            : (r.item.currentBalance ?? 0) <= (r.item.minStock ?? 0)
+            ? "low"
+            : "ok",
+        currentBalance: r.item.currentBalance ?? 0,
+        minStock: r.item.minStock ?? 0,
         recommendedOrder: r.deficit,
         orderQty: r.deficit,
         unitPrice: r.item.unitCost || 0,
@@ -517,11 +641,41 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
       };
     });
 
-    onCreatePurchaseOrder(poItems, `ดึงจากหน้าเตือนสั่งซื้อ (${filterContext})`, safetyBufferPercent);
+    onCreatePurchaseOrder(
+      poItems,
+      `ดึงจากหน้าเตือนสั่งซื้อ (${filterContext})`,
+      safetyBufferPercent
+    );
   };
 
   return (
     <div className="space-y-4 pb-12">
+      {/* Inline Notice / Feedback Banner */}
+      {notice && (
+        <div
+          className={`p-3.5 rounded-2xl border flex items-center justify-between text-xs font-semibold shadow-sm ${
+            notice.type === "error"
+              ? "bg-rose-50 text-rose-800 border-rose-200"
+              : "bg-emerald-50 text-emerald-800 border-emerald-200"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {notice.type === "error" ? (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            )}
+            <span>{notice.text}</span>
+          </div>
+          <button
+            onClick={() => setNotice(null)}
+            className="text-slate-400 hover:text-slate-700 px-1.5 cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-amber-50/80 via-white to-amber-50/40 p-6 rounded-2xl text-slate-900 shadow-xs border border-amber-200/80 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div>
@@ -530,10 +684,10 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
             <span>ระบบแจ้งเตือนสต็อกต่ำ & แนะนำการสั่งซื้อ (Reorder Planning)</span>
           </div>
           <h2 className="text-2xl font-bold tracking-tight text-slate-900">
-            รายการสินค้าที่ต้องสั่งซื้อ ({filtered.length} รายการ)
+            รายการสินค้าที่ต้องสั่งซื้อ ({filtered.length.toLocaleString()} รายการ)
           </h2>
           <p className="text-xs text-slate-500 mt-1">
-            คำนวณจากเกณฑ์ Min Stock พร้อมเผื่อ Safety Stock สำหรับกระบวนการผลิต
+            คำนวณจากเกณฑ์ Min Stock พร้อมเผื่อ Safety Stock สำหรับกระบวนการผลิต (คลิกหรือดับเบิลคลิกที่รายการเพื่อดูประวัติรับเข้า-จ่ายออก)
           </p>
         </div>
 
@@ -556,7 +710,7 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
               title="สร้างใบสั่งซื้อเฉพาะรายการที่ Filter ณ ตอนนี้"
             >
               <ShoppingBag className="w-4 h-4" />
-              <span>สร้างใบสั่งซื้อจากที่กรอง ({reorderCalculations.length})</span>
+              <span>สร้างใบสั่งซื้อจากที่กรอง ({reorderCalculations.length.toLocaleString()})</span>
             </button>
           )}
 
@@ -591,7 +745,7 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
             {filtered.length.toLocaleString()} รายการ
           </div>
           <span className="text-xs text-slate-400">
-            จากทั้งหมด {lowStockItems.length} รายการที่ต่ำกว่า Min
+            จากทั้งหมด {lowStockItems.length.toLocaleString()} รายการในเกณฑ์แจ้งเตือน
           </span>
         </div>
 
@@ -737,7 +891,9 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
 
             {filterOrderStatus !== "all" && (
               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-medium">
-                <span>สถานะ: {filterOrderStatus === "ordered" ? "สั่งซื้อแล้ว" : "ยังไม่ได้สั่งซื้อ"}</span>
+                <span>
+                  สถานะ: {filterOrderStatus === "ordered" ? "สั่งซื้อแล้ว" : "ยังไม่ได้สั่งซื้อ"}
+                </span>
                 <button
                   onClick={() => setFilterOrderStatus("all")}
                   className="text-amber-400 hover:text-amber-700 ml-0.5 cursor-pointer"
@@ -774,9 +930,9 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
           </div>
         )}
 
-        {/* Safety buffer setting & Sorting */}
+        {/* Safety buffer setting, Criteria mode & Sorting */}
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2">
               <Calculator className="w-4 h-4 text-amber-600" />
               <span className="font-semibold text-slate-700">Safety Buffer เผื่อสั่งซื้อ:</span>
@@ -794,6 +950,29 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
                 +{pct}% {pct === 0 ? "(พอดี Min)" : ""}
               </button>
             ))}
+
+            {outOfStockZeroMinCount > 0 && (
+              <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setAlertCriteria((prev) =>
+                      prev === "minStock" ? "includeZero" : "minStock"
+                    )
+                  }
+                  className={`px-2.5 py-1 rounded-lg font-semibold transition cursor-pointer ${
+                    alertCriteria === "includeZero"
+                      ? "bg-rose-600 text-white shadow-xs"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                  title="แสดงรวมรายการที่ยอดคงเหลือ ≤ 0 แม้ยังไม่ได้ตั้งค่า Min Stock ในชีท"
+                >
+                  {alertCriteria === "includeZero"
+                    ? `✓ รวมสินค้าหมดสต็อกทั้งหมด (+${outOfStockZeroMinCount})`
+                    : `รวมสินค้าหมดที่ยังไม่ตั้ง Min (+${outOfStockZeroMinCount})`}
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -806,11 +985,12 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
               <option value="estimatedCost">งบประมาณสั่งซื้อสูงสุด</option>
               <option value="deficit">จำนวนขาดสูงสุด</option>
               <option value="balance">คงเหลือน้อยสุด</option>
+              <option value="risk">ความเสี่ยงสูงสุด</option>
               <option value="name">ชื่อสินค้า</option>
             </select>
             <button
               onClick={() => setSortOrder(sortOrder === "asc" ? "desc" : "asc")}
-              className="p-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition"
+              className="p-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
               title="สลับลำดับ มาก-น้อย"
             >
               <ArrowUpDown className="w-3.5 h-3.5" />
@@ -840,7 +1020,7 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs border-collapse">
-            <thead className="bg-slate-100 text-slate-700 font-semibold sticky top-0 select-none border-b border-slate-200">
+            <thead className="bg-slate-100 text-slate-700 font-semibold sticky top-0 z-10 select-none border-b border-slate-200">
               <tr>
                 <th className="p-3 w-12 text-center text-slate-500">#</th>
                 <th
@@ -933,8 +1113,6 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
                     {renderSortIcon("supplier")}
                   </div>
                 </th>
-                
-
                 <th
                   onClick={() => handleHeaderSort("risk")}
                   className="p-3 text-center cursor-pointer hover:bg-slate-200 transition group text-slate-700"
@@ -945,47 +1123,56 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
                     {renderSortIcon("risk")}
                   </div>
                 </th>
-
                 <th className="p-3 text-center text-slate-700 w-40">หมายเหตุสั่งซื้อ</th>
-
                 <th className="p-3 text-center w-24 text-slate-700">ทำรายการ</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {reorderCalculations.length === 0 ? (
+              {displayedCalculations.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="text-center py-12 text-slate-400 text-sm">
-                    ไม่มีรายการสินค้าที่ต้องสั่งซื้อตามเงื่อนไข
+                  <td colSpan={13} className="text-center py-12 text-slate-400 text-sm">
+                    {items.length === 0
+                      ? "กำลังโหลดข้อมูลรายการสต็อก..."
+                      : "ไม่มีรายการสินค้าที่ต้องสั่งซื้อตามเงื่อนไขที่เลือก"}
                   </td>
                 </tr>
               ) : (
-                reorderCalculations.map((r, idx) => {
+                displayedCalculations.map((r, idx) => {
                   const it = r.item;
-                  const oStatus = orderStatuses.find(s => s.barcode === it.barcode);
-                  const isOrdered = oStatus?.isOrdered || false;
+                  const cleanCode = String(it.barcode || "").trim();
+                  const oStatus = orderStatusMap.get(cleanCode);
+                  const isOrdered = Boolean(oStatus?.isOrdered);
+                  const lotLabel = oStatus?.lotNumber ? String(oStatus.lotNumber).trim() : "-";
+                  const isCurrentLot =
+                    isOrdered && Boolean(activeLotNumber) && lotLabel === activeLotNumber;
+                  const balance = it.currentBalance ?? 0;
+                  const minStock = it.minStock ?? 0;
+                  const unitCost = it.unitCost ?? 0;
 
                   return (
                     <tr
-                      key={`${it.id || it.barcode}_${idx}`}
+                      key={`${it.id || cleanCode}_${idx}`}
                       onClick={() => onSelectItem(it)}
-                      className={`transition cursor-pointer ${isOrdered ? "bg-emerald-50/70 hover:bg-emerald-100" : "hover:bg-amber-50/40"}`}
+                      onDoubleClick={() => onSelectItem(it)}
+                      style={{ contentVisibility: "auto", containIntrinsicSize: "0 56px" }}
+                      className={`transition cursor-pointer ${
+                        isOrdered
+                          ? "bg-emerald-50/70 hover:bg-emerald-100"
+                          : "hover:bg-amber-50/40"
+                      }`}
                     >
-                      <td className="p-3 text-center text-slate-400 font-mono">
-                        {idx + 1}
-                      </td>
-                      <td className="p-3 font-mono font-bold text-slate-800">
-                        {it.barcode}
-                      </td>
+                      <td className="p-3 text-center text-slate-400 font-mono">{idx + 1}</td>
+                      <td className="p-3 font-mono font-bold text-slate-800">{cleanCode}</td>
                       <td className="p-3 font-medium text-slate-900">
                         <div>{it.name}</div>
                         <div className="text-[10px] text-slate-400">
-                          ชนิด: {it.category} | คลัง: {it.location || "-"}
+                          ชนิด: {it.category || "-"} | คลัง: {it.location || "-"}
                         </div>
                       </td>
                       <td className="p-3 text-slate-600">{it.line || "-"}</td>
                       <td className="p-3 text-right">
                         <span className="font-bold text-rose-600 font-mono">
-                          {it.currentBalance.toLocaleString()}
+                          {balance.toLocaleString()}
                         </span>{" "}
                         <span className="text-[10px] text-slate-400">{it.unit}</span>
                         <div className="text-[10px] text-slate-400">
@@ -993,7 +1180,7 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
                         </div>
                       </td>
                       <td className="p-3 text-right font-mono text-slate-700">
-                        {it.minStock.toLocaleString()} {it.unit}
+                        {minStock.toLocaleString()} {it.unit}
                       </td>
                       <td className="p-3 text-right">
                         <span className="font-bold text-amber-700 font-mono text-sm bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
@@ -1001,14 +1188,12 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
                         </span>
                       </td>
                       <td className="p-3 text-right font-mono text-slate-700">
-                        ฿{it.unitCost.toFixed(2)}
+                        ฿{unitCost.toFixed(2)}
                       </td>
                       <td className="p-3 text-right font-mono font-bold text-emerald-700">
                         ฿{r.estimatedCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                       </td>
-                      <td className="p-3 text-slate-700 font-medium">
-                        {it.supplier || "-"}
-                      </td>
+                      <td className="p-3 text-slate-700 font-medium">{it.supplier || "-"}</td>
 
                       <td className="p-3 text-center">
                         {r.riskLevel === "critical" ? (
@@ -1028,70 +1213,71 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
                             <CheckCircle2 className="w-3 h-3" /> เพียงพอ
                           </span>
                         )}
-<div className="text-[9px] text-slate-400 mt-0.5">
-                          {r.monthsOfStockRemaining > 90 ? ">90" : r.monthsOfStockRemaining.toFixed(1)} ด.
+                        <div className="text-[9px] text-slate-400 mt-0.5">
+                          {r.monthsOfStockRemaining > 90
+                            ? ">90"
+                            : r.monthsOfStockRemaining.toFixed(1)}{" "}
+                          ด.
                         </div>
                         {isOrdered && (
                           <div className="mt-1">
                             <span className="inline-block text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-200">
-                              สั่งซื้อรอจัดส่ง (Lot: {oStatus?.lotNumber || "-"})
+                              สั่งซื้อรอจัดส่ง (Lot: {lotLabel})
                             </span>
                           </div>
                         )}
                       </td>
 
-
                       {/* หมายเหตุสั่งซื้อ */}
                       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
-                        {(() => {
-                          const isCurrentLot = isOrdered && activeLotNumber && oStatus?.lotNumber === activeLotNumber;
-                          return (
-                            <div className="flex flex-col items-center justify-center gap-1">
-                              <label
-                                className={`inline-flex items-center gap-1.5 ${
-                                  !activeLotNumber || !canManageOrderStatus ? "cursor-not-allowed opacity-50" : "cursor-pointer"
-                                }`}
-                                title={
-                                  !canManageOrderStatus
-                                    ? "คุณไม่มีสิทธิ์จัดการสถานะสั่งซื้อ (กำหนดได้ในเมนู พนักงาน & สิทธิ์)"
-                                    : !activeLotNumber
-                                    ? "กรุณาสร้างหรือเลือก และกด 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ"
-                                    : isOrdered
-                                    ? `คลิกเพื่อยกเลิกสถานะสั่งซื้อ (Lot: ${oStatus?.lotNumber || "-"})`
-                                    : `คลิกเพื่อบันทึกสั่งซื้อเข้า Lot: ${activeLotNumber}`
-                                }
-                              >
-                                <input 
-                                  type="checkbox"
-                                  className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer disabled:cursor-not-allowed accent-indigo-600"
-                                  disabled={!activeLotNumber || !canManageOrderStatus}
-                                  checked={isOrdered}
-                                  onChange={(e) => handleToggleOrderStatus(it.barcode, e.target.checked)}
-                                />
-                                <span
-                                  className={`text-[11px] font-medium select-none ${
-                                    isOrdered ? "text-emerald-700 font-semibold" : "text-slate-400"
-                                  }`}
-                                >
-                                  {isOrdered ? "สั่งซื้อแล้ว" : "ยังไม่สั่ง"}
-                                </span>
-                              </label>
+                        <div className="flex flex-col items-center justify-center gap-1">
+                          <label
+                            className={`inline-flex items-center gap-1.5 ${
+                              !activeLotNumber || !canManageOrderStatus
+                                ? "cursor-not-allowed opacity-50"
+                                : "cursor-pointer"
+                            }`}
+                            title={
+                              !canManageOrderStatus
+                                ? "คุณไม่มีสิทธิ์จัดการสถานะสั่งซื้อ (กำหนดได้ในเมนู พนักงาน & สิทธิ์)"
+                                : !activeLotNumber
+                                ? "กรุณาสร้างหรือเลือก และกด 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ"
+                                : isOrdered
+                                ? `คลิกเพื่อยกเลิกสถานะสั่งซื้อ (Lot: ${lotLabel})`
+                                : `คลิกเพื่อบันทึกสั่งซื้อเข้า Lot: ${activeLotNumber}`
+                            }
+                          >
+                            <input
+                              type="checkbox"
+                              className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer disabled:cursor-not-allowed accent-indigo-600"
+                              disabled={!activeLotNumber || !canManageOrderStatus}
+                              checked={isOrdered}
+                              onChange={(e) =>
+                                handleToggleOrderStatus(cleanCode, e.target.checked)
+                              }
+                            />
+                            <span
+                              className={`text-[11px] font-medium select-none ${
+                                isOrdered ? "text-emerald-700 font-semibold" : "text-slate-400"
+                              }`}
+                            >
+                              {isOrdered ? "สั่งซื้อแล้ว" : "ยังไม่สั่ง"}
+                            </span>
+                          </label>
 
-                              {isOrdered && (
-                                <span
-                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                                    isCurrentLot
-                                      ? "bg-emerald-100 text-emerald-800 border-emerald-300 shadow-xs"
-                                      : "bg-indigo-50 text-indigo-700 border-indigo-200"
-                                  }`}
-                                  title={`เลขที่รอบ Lot: ${oStatus?.lotNumber || "-"}`}
-                                >
-                                  Lot: {oStatus?.lotNumber || "-"}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })()}
+                          {isOrdered && (
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                isCurrentLot
+                                  ? "bg-emerald-100 text-emerald-800 border-emerald-300 shadow-xs"
+                                  : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                              }`}
+                              title={`เลขที่รอบ Lot: ${lotLabel}`}
+                            >
+                              Lot: {lotLabel}
+                            </span>
+                          )}
+                        </div>
                       </td>
 
                       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
@@ -1119,13 +1305,54 @@ export const LowStockAlertsView: React.FC<LowStockAlertsViewProps> = ({
           </table>
         </div>
 
+        {/* Progressive Scroll Sentinel */}
+        {!showAllDirectly && displayedCalculations.length < reorderCalculations.length && (
+          <div
+            ref={sentinelRef}
+            className="px-5 py-3 bg-amber-50/40 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600"
+          >
+            <span>
+              กำลังแสดง {displayedCalculations.length.toLocaleString()} จาก{" "}
+              {reorderCalculations.length.toLocaleString()} รายการ (เลื่อนลงเพื่อโหลดเพิ่มอัตโนมัติ)
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setVisibleCount((prev) =>
+                    Math.min(prev + BATCH_INCREMENT * 2, reorderCalculations.length)
+                  )
+                }
+                className="px-3 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-semibold cursor-pointer"
+              >
+                โหลดเพิ่ม +120 รายการ
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAllDirectly(true)}
+                className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold cursor-pointer"
+              >
+                แสดงทั้งหมดทันที ({reorderCalculations.length.toLocaleString()})
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Table footer summary */}
         <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
           <div className="text-slate-600 font-medium">
-            แสดงทั้งหมด {reorderCalculations.length.toLocaleString()} รายการที่ต้องสั่งซื้อ (แสดงครบในหน้าเดียว)
+            แสดง {displayedCalculations.length.toLocaleString()} จากทั้งหมด{" "}
+            {reorderCalculations.length.toLocaleString()} รายการที่ต้องสั่งซื้อ
           </div>
           <div className="text-slate-500">
-            ยอดรวมแนะนำสั่งซื้อ: <span className="font-bold text-slate-800">{reorderCalculations.reduce((sum, r) => sum + r.deficit, 0).toLocaleString()} ชิ้น</span> | ประมาณการงบประมาณ: <span className="font-bold text-amber-700">฿{reorderCalculations.reduce((sum, r) => sum + r.estimatedCost, 0).toLocaleString()}</span>
+            ยอดรวมแนะนำสั่งซื้อทั้งหมด:{" "}
+            <span className="font-bold text-slate-800">
+              {totalUnitsToOrder.toLocaleString()} ชิ้น
+            </span>{" "}
+            | ประมาณการงบประมาณรวม:{" "}
+            <span className="font-bold text-amber-700">
+              ฿{totalEstimatedCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            </span>
           </div>
         </div>
       </div>

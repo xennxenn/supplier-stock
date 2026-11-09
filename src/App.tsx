@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { Component, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Navbar } from "./components/Navbar";
 import { DashboardView } from "./components/DashboardView";
 import { StockListView } from "./components/StockListView";
@@ -42,17 +42,153 @@ import {
   canAccessTab,
   hasPermission,
   isLineAllowed,
+  hasExplicitDataScope,
 } from "./utils/permissionUtils";
-import { RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  loadCachedSheetsData,
+  loadCachedSheetsDataSync,
+  saveCachedSheetsData,
+} from "./utils/cacheStorage";
+import { CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
+
+interface ViewErrorBoundaryProps {
+  activeTab: string;
+  children: React.ReactNode;
+}
+interface ViewErrorBoundaryState {
+  hasError: boolean;
+  errorMessage: string;
+}
+
+class ViewErrorBoundary extends Component<
+  ViewErrorBoundaryProps,
+  ViewErrorBoundaryState
+> {
+  declare props: Readonly<ViewErrorBoundaryProps>;
+  declare setState: Component<ViewErrorBoundaryProps, ViewErrorBoundaryState>["setState"];
+  state: ViewErrorBoundaryState = { hasError: false, errorMessage: "" };
+
+  static getDerivedStateFromError(error: unknown): ViewErrorBoundaryState {
+    return {
+      hasError: true,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  componentDidCatch(error: unknown, info: React.ErrorInfo) {
+    console.error("ViewErrorBoundary caught error:", error, info);
+  }
+
+  componentDidUpdate(prevProps: ViewErrorBoundaryProps) {
+    if (prevProps.activeTab !== this.props.activeTab && this.state.hasError) {
+      this.setState({ hasError: false, errorMessage: "" });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="bg-white rounded-2xl border border-amber-200 p-8 text-center shadow-xs my-6 max-w-xl mx-auto space-y-3">
+          <AlertCircle className="w-8 h-8 text-amber-600 mx-auto" />
+          <h3 className="text-base font-bold text-slate-900">
+            กำลังรีเฟรชการแสดงผลหน้านี้
+          </h3>
+          <p className="text-xs text-slate-500">
+            {this.state.errorMessage || "เกิดข้อผิดพลาดชั่วคราวในการแสดงผล"}
+          </p>
+          <button
+            type="button"
+            onClick={() => this.setState({ hasError: false, errorMessage: "" })}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>โหลดหน้านี้ใหม่</span>
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function isSameEmployeeConfig(a: Employee, b: Employee): boolean {
+  if (a.id !== b.id || a.name !== b.name || a.role !== b.role || a.department !== b.department) {
+    return false;
+  }
+  const linesA = (a.allowedLines || []).slice().sort().join("|");
+  const linesB = (b.allowedLines || []).slice().sort().join("|");
+  if (linesA !== linesB) return false;
+  const supsA = (a.allowedSuppliers || []).slice().sort().join("|");
+  const supsB = (b.allowedSuppliers || []).slice().sort().join("|");
+  if (supsA !== supsB) return false;
+  const permsA = a.perms || {};
+  const permsB = b.perms || {};
+  const allKeys = new Set([...Object.keys(permsA), ...Object.keys(permsB)]);
+  for (const k of allKeys) {
+    if (Boolean(permsA[k]) !== Boolean(permsB[k])) return false;
+  }
+  return true;
+}
+
+function computeDataSignature(data: SheetsSyncData): string {
+  const firstTx = data.recentTransactions?.[0];
+  const lastTx = data.recentTransactions?.[data.recentTransactions.length - 1];
+  return [
+    data.stockItems?.length || 0,
+    data.recentTransactions?.length || 0,
+    data.stats?.totalValue || 0,
+    firstTx?.id || "",
+    firstTx?.balance || 0,
+    lastTx?.id || "",
+  ].join("::");
+}
+
+const VALID_TABS: Set<NavTab> = new Set([
+  "dashboard",
+  "stock",
+  "transactions",
+  "movement",
+  "monthlyUsage",
+  "alerts",
+  "forecast",
+  "purchaseOrders",
+  "reports",
+  "employees",
+  "backup",
+  "settings",
+]);
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
-  const [items, setItems] = useState<StockItem[]>([]);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [syncData, setSyncData] = useState<SheetsSyncData | null>(null);
+  const initialCached = useMemo(() => loadCachedSheetsDataSync(), []);
+  const [activeTab, setActiveTabState] = useState<NavTab>(() => {
+    try {
+      const saved = sessionStorage.getItem("pasaya_active_tab") as NavTab | null;
+      if (saved && VALID_TABS.has(saved)) return saved;
+    } catch {}
+    return "dashboard";
+  });
+
+  const setActiveTab = useCallback((tab: NavTab) => {
+    setActiveTabState(tab);
+    try {
+      sessionStorage.setItem("pasaya_active_tab", tab);
+    } catch {}
+  }, []);
+
+  const [items, setItems] = useState<StockItem[]>(() => initialCached?.stockItems || []);
+  const [transactions, setTransactions] = useState<Transaction[]>(
+    () => initialCached?.recentTransactions || []
+  );
+  const [syncData, setSyncData] = useState<SheetsSyncData | null>(() => initialCached);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(
+    () => initialCached?.syncedAt || null
+  );
   const [syncError, setSyncError] = useState<string | null>(null);
+  const dataSignatureRef = useRef<string>(
+    initialCached ? computeDataSignature(initialCached) : ""
+  );
+  const txCountRef = useRef<number>(initialCached?.recentTransactions?.length || 0);
 
   // Authentication & Persistent Session in localStorage
   const [employees, setEmployees] = useState<Employee[]>(() => {
@@ -60,12 +196,17 @@ export default function App() {
       const saved = localStorage.getItem("pasaya_stock_employees");
       if (saved) {
         const parsed: Employee[] = JSON.parse(saved);
-        // Ensure standard admin has the current updated credentials
         return parsed.map((emp) => {
           if (emp.id === "emp_admin") {
             const defaultAdmin = INITIAL_EMPLOYEES.find((x) => x.id === "emp_admin");
             if (defaultAdmin) {
-              return { ...emp, username: defaultAdmin.username, password: defaultAdmin.password, pin: defaultAdmin.pin, employeeCode: defaultAdmin.employeeCode };
+              return {
+                ...emp,
+                username: defaultAdmin.username,
+                password: defaultAdmin.password,
+                pin: defaultAdmin.pin,
+                employeeCode: defaultAdmin.employeeCode,
+              };
             }
           }
           return emp;
@@ -92,7 +233,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    return null; // Require login on new devices / unauthenticated browsers
+    return null;
   });
 
   // Modals & UI States
@@ -141,24 +282,22 @@ export default function App() {
     try {
       const data = await fetchSheetsData(force);
       if (data && data.stockItems && data.stockItems.length > 0) {
-        setSyncData(data);
-        setItems(data.stockItems);
-        setTransactions(
-          data.recentTransactions?.length > 0
-            ? data.recentTransactions
-            : []
-        );
+        const newSig = computeDataSignature(data);
+        const hasDataChanged = force || !silent || newSig !== dataSignatureRef.current;
+
         setLastSyncedAt(data.syncedAt);
-        try {
-          // Cache only a subset to prevent localStorage QuotaExceededError
-          const cacheData = { 
-            ...data, 
-            recentTransactions: data.recentTransactions?.slice(0, 1500) || [] 
-          };
-          localStorage.setItem("pasaya_stock_cache", JSON.stringify(cacheData));
-        } catch (storageErr) {
-          console.warn("Could not save to localStorage (quota exceeded)", storageErr);
+
+        if (hasDataChanged) {
+          dataSignatureRef.current = newSig;
+          txCountRef.current = data.recentTransactions?.length || 0;
+          setSyncData(data);
+          setItems(data.stockItems);
+          if (data.recentTransactions && data.recentTransactions.length > 0) {
+            setTransactions(data.recentTransactions);
+          }
+          saveCachedSheetsData(data).catch(() => {});
         }
+
         if (!silent) {
           showToast(
             `ซิงค์ข้อมูล Google Sheets สำเร็จ! โหลด ${data.totalStockItems.toLocaleString()} รายการสต็อก และ ${data.totalTransactions.toLocaleString()} ประวัติเบิกจ่าย`
@@ -178,6 +317,17 @@ export default function App() {
     }
   }, []);
 
+  const persistCurrentUserStorage = useCallback((updated: Employee) => {
+    try {
+      if (localStorage.getItem("pasaya_current_user")) {
+        localStorage.setItem("pasaya_current_user", JSON.stringify(updated));
+      }
+      if (sessionStorage.getItem("pasaya_current_user")) {
+        sessionStorage.setItem("pasaya_current_user", JSON.stringify(updated));
+      }
+    } catch {}
+  }, []);
+
   // Sync employees with server across all devices
   const syncEmployees = useCallback(async () => {
     try {
@@ -189,7 +339,8 @@ export default function App() {
           if (!prev) return null;
           const updatedSelf = serverEmps.find((e) => e.id === prev.id);
           if (!updatedSelf) return prev;
-          if (JSON.stringify(prev) !== JSON.stringify(updatedSelf)) {
+          if (!isSameEmployeeConfig(prev, updatedSelf)) {
+            persistCurrentUserStorage(updatedSelf);
             return updatedSelf;
           }
           return prev;
@@ -198,36 +349,43 @@ export default function App() {
     } catch (e) {
       console.warn("Failed to sync employees from server:", e);
     }
-  }, []);
+  }, [persistCurrentUserStorage]);
 
   // Initial load & periodic background sync
   useEffect(() => {
-    // Check local cache first
-    try {
-      const cached = localStorage.getItem("pasaya_stock_cache");
-      if (cached) {
-        const parsed = JSON.parse(cached) as SheetsSyncData;
-        if (parsed?.stockItems?.length > 0) {
-          setSyncData(parsed);
-          setItems(parsed.stockItems);
-          setTransactions(parsed.recentTransactions || []);
-          setLastSyncedAt(parsed.syncedAt);
+    let isMounted = true;
+
+    // 1. Immediately hydrate full untruncated dataset from IndexedDB (< 25ms)
+    loadCachedSheetsData()
+      .then((cached) => {
+        if (!isMounted || !cached || !cached.stockItems?.length) return;
+        const cachedSig = computeDataSignature(cached);
+        const cachedTxLen = cached.recentTransactions?.length || 0;
+        if (!dataSignatureRef.current || cachedTxLen > txCountRef.current) {
+          dataSignatureRef.current = cachedSig;
+          txCountRef.current = cachedTxLen;
+          setSyncData(cached);
+          setItems(cached.stockItems);
+          if (cachedTxLen > 0) {
+            setTransactions(cached.recentTransactions);
+          }
+          setLastSyncedAt(cached.syncedAt);
         }
-      }
-    } catch (e) {
-      console.warn("Failed to load local cache", e);
-    }
+      })
+      .catch(() => {});
 
-    // Initial server fetch
+    // 2. Initial server fetch
     syncEmployees();
-    performSync(false);
+    performSync(false, Boolean(initialCached?.stockItems?.length));
 
-    // 1. Real-time live listener for employees from Cloud Firestore (sync across all devices instantly)
+    // 3. Real-time live listener for employees from Cloud Firestore
     const unsubscribeEmps = onSnapshot(
       employeesCol,
       (snapshot) => {
         if (!snapshot.empty) {
-          const liveList: Employee[] = snapshot.docs.map((docSnap) => docSnap.data() as Employee);
+          const liveList: Employee[] = snapshot.docs.map(
+            (docSnap) => docSnap.data() as Employee
+          );
           if (liveList.length > 0) {
             setEmployees(liveList);
             try {
@@ -237,7 +395,8 @@ export default function App() {
               if (!prev) return null;
               const updatedSelf = liveList.find((e) => e.id === prev.id);
               if (!updatedSelf) return prev;
-              if (JSON.stringify(prev) !== JSON.stringify(updatedSelf)) {
+              if (!isSameEmployeeConfig(prev, updatedSelf)) {
+                persistCurrentUserStorage(updatedSelf);
                 return updatedSelf;
               }
               return prev;
@@ -250,29 +409,22 @@ export default function App() {
       }
     );
 
-    // Periodic background sync
+    // Periodic background sync (every 90s, silent & zero-flicker)
     const sheetsTimer = setInterval(() => {
       performSync(false, true);
-    }, 45000);
+    }, 90000);
 
     const empTimer = setInterval(() => {
       syncEmployees();
-    }, 30000);
-
-    // Sync on window/tab focus
-    const handleFocus = () => {
-      syncEmployees();
-      performSync(false, true);
-    };
-    window.addEventListener("focus", handleFocus);
+    }, 60000);
 
     return () => {
+      isMounted = false;
       unsubscribeEmps();
       clearInterval(sheetsTimer);
       clearInterval(empTimer);
-      window.removeEventListener("focus", handleFocus);
     };
-  }, [performSync, syncEmployees]);
+  }, [performSync, syncEmployees, persistCurrentUserStorage]);
 
   // Tab permission guard: If current user doesn't have permission to view activeTab, auto-redirect
   useEffect(() => {
@@ -283,8 +435,10 @@ export default function App() {
         "stock",
         "transactions",
         "movement",
+        "monthlyUsage",
         "alerts",
         "forecast",
+        "purchaseOrders",
         "reports",
         "employees",
         "backup",
@@ -294,7 +448,7 @@ export default function App() {
         setActiveTab(firstAllowed);
       }
     }
-  }, [currentUser, activeTab]);
+  }, [currentUser, activeTab, setActiveTab]);
 
   // Handle saving employees (Persisted both to server and localStorage)
   const handleSaveEmployees = async (newEmps: Employee[]) => {
@@ -302,9 +456,11 @@ export default function App() {
     localStorage.setItem("pasaya_stock_employees", JSON.stringify(newEmps));
     if (currentUser) {
       const updatedSelf = newEmps.find((e) => e.id === currentUser.id);
-      if (updatedSelf) setCurrentUser(updatedSelf);
+      if (updatedSelf) {
+        setCurrentUser(updatedSelf);
+        persistCurrentUserStorage(updatedSelf);
+      }
     }
-    // Save to persistent server so it syncs across all devices & deploys
     try {
       await saveEmployeesOnline(newEmps);
     } catch (err) {
@@ -370,7 +526,10 @@ export default function App() {
     // Optimistically update item stock balance
     setItems((prev) =>
       prev.map((it) => {
-        if (it.barcode.trim().toLowerCase() === newTx.barcode.trim().toLowerCase()) {
+        if (
+          String(it.barcode || "").trim().toLowerCase() ===
+          String(newTx.barcode || "").trim().toLowerCase()
+        ) {
           const updatedBalance =
             newTx.qtyIn > 0
               ? it.currentBalance + newTx.qtyIn
@@ -401,7 +560,9 @@ export default function App() {
     if (backup.data?.items && backup.data.items.length > 0) {
       setItems(backup.data.items);
       setTransactions(backup.data.txs || []);
-      showToast(`กู้คืนข้อมูลจากสำรอง (${new Date(backup.ts).toLocaleString("th-TH")}) สำเร็จ!`);
+      showToast(
+        `กู้คืนข้อมูลจากสำรอง (${new Date(backup.ts).toLocaleString("th-TH")}) สำเร็จ!`
+      );
     }
   };
 
@@ -412,7 +573,10 @@ export default function App() {
       if (!i.line) continue;
       const raw = i.line.trim();
       if (!raw || raw === "-") continue;
-      const tokens = raw.split(/[,/;\+|\n]/).map((t) => t.trim()).filter(Boolean);
+      const tokens = raw
+        .split(/[,/;\+|\n]/)
+        .map((t) => t.trim())
+        .filter(Boolean);
       for (const t of tokens) {
         set.add(t);
       }
@@ -445,7 +609,6 @@ export default function App() {
   const uniqueLines = useMemo(() => {
     if (
       !currentUser ||
-      currentUser.role === "admin" ||
       !currentUser.allowedLines ||
       currentUser.allowedLines.length === 0 ||
       currentUser.allowedLines.includes("ALL")
@@ -467,9 +630,16 @@ export default function App() {
     return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
   }, [scopedItems]);
 
-  const lowStockCount = scopedItems.filter(
-    (i) => i.currentBalance <= i.minStock && i.minStock > 0
-  ).length;
+  const lowStockCount = useMemo(() => {
+    let count = 0;
+    for (let i = 0; i < scopedItems.length; i++) {
+      const it = scopedItems[i];
+      if ((it.currentBalance ?? 0) <= (it.minStock ?? 0) && (it.minStock ?? 0) > 0) {
+        count++;
+      }
+    }
+    return count;
+  }, [scopedItems]);
 
   const handleLoginSuccess = (
     emp: Employee,
@@ -556,30 +726,28 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 w-full max-w-[1920px] mx-auto px-3 sm:px-6 lg:px-8 py-5">
         {/* Access scope indicator banner for restricted users */}
-        {currentUser.role !== "admin" &&
-          ((currentUser.allowedLines && currentUser.allowedLines.length > 0) ||
-            (currentUser.allowedSuppliers &&
-              currentUser.allowedSuppliers.length > 0)) && (
-            <div className="mb-4 p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-slate-800 text-xs flex flex-wrap items-center justify-between gap-2 shadow-xs">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                <span className="font-bold">จำกัดสิทธิ์การเข้าถึงข้อมูลเฉพาะบุคคล:</span>
-                {currentUser.allowedLines && currentUser.allowedLines.length > 0 && (
-                  <span className="px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 font-semibold border border-amber-200">
-                    ไลน์: {currentUser.allowedLines.join(", ")}
-                  </span>
-                )}
-                {currentUser.allowedSuppliers && currentUser.allowedSuppliers.length > 0 && (
-                  <span className="px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-900 font-semibold border border-indigo-200">
-                    Supplier: {currentUser.allowedSuppliers.join(", ")}
-                  </span>
-                )}
-              </div>
-              <span className="text-[11px] text-slate-500">
-                (แสดง {scopedItems.length.toLocaleString()} จาก {items.length.toLocaleString()} รายการ)
-              </span>
+        {hasExplicitDataScope(currentUser) && (
+          <div className="mb-4 p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-slate-800 text-xs flex flex-wrap items-center justify-between gap-2 shadow-xs">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+              <span className="font-bold">จำกัดสิทธิ์การเข้าถึงข้อมูลเฉพาะบุคคล:</span>
+              {currentUser.allowedLines && currentUser.allowedLines.length > 0 && (
+                <span className="px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 font-semibold border border-amber-200">
+                  ไลน์: {currentUser.allowedLines.join(", ")}
+                </span>
+              )}
+              {currentUser.allowedSuppliers && currentUser.allowedSuppliers.length > 0 && (
+                <span className="px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-900 font-semibold border border-indigo-200">
+                  Supplier: {currentUser.allowedSuppliers.join(", ")}
+                </span>
+              )}
             </div>
-          )}
+            <span className="text-[11px] text-slate-500">
+              (แสดง {scopedItems.length.toLocaleString()} จาก{" "}
+              {items.length.toLocaleString()} รายการ)
+            </span>
+          </div>
+        )}
 
         {/* Sync error banner if any */}
         {syncError && (
@@ -599,134 +767,137 @@ export default function App() {
           </div>
         )}
 
-        {/* Views */}
-        {activeTab === "dashboard" && (
-          <DashboardView
-            data={syncData}
-            items={scopedItems}
-            transactions={scopedTransactions}
-            onNavigate={(tab) => setActiveTab(tab)}
-            onSelectItem={(item) => setSelectedDetailItem(item)}
-            isSyncing={isSyncing}
-            onSync={() => performSync(true)}
-          />
-        )}
+        {/* Views wrapped in resilient ErrorBoundary */}
+        <ViewErrorBoundary activeTab={activeTab}>
+          {activeTab === "dashboard" && (
+            <DashboardView
+              data={syncData}
+              items={scopedItems}
+              transactions={scopedTransactions}
+              onNavigate={(tab) => setActiveTab(tab)}
+              onSelectItem={(item) => setSelectedDetailItem(item)}
+              isSyncing={isSyncing}
+              onSync={() => performSync(true)}
+            />
+          )}
 
-        {activeTab === "stock" && (
-          <StockListView
-            items={scopedItems}
-            currentUser={currentUser}
-            onSelectItem={(item) => setSelectedDetailItem(item)}
-            onQuickMove={handleQuickMove}
-            categories={uniqueCategories}
-            lines={uniqueLines}
-          />
-        )}
+          {activeTab === "stock" && (
+            <StockListView
+              items={scopedItems}
+              transactions={scopedTransactions}
+              currentUser={currentUser}
+              onSelectItem={(item) => setSelectedDetailItem(item)}
+              onQuickMove={handleQuickMove}
+              categories={uniqueCategories}
+              lines={uniqueLines}
+            />
+          )}
 
-        {activeTab === "transactions" && (
-          <TransactionsView
-            transactions={scopedTransactions}
-            lines={uniqueLines}
-            stockItems={scopedItems}
-            currentUser={currentUser}
-            onSelectItem={(item) => setSelectedDetailItem(item)}
-          />
-        )}
+          {activeTab === "transactions" && (
+            <TransactionsView
+              transactions={scopedTransactions}
+              lines={uniqueLines}
+              stockItems={scopedItems}
+              currentUser={currentUser}
+              onSelectItem={(item) => setSelectedDetailItem(item)}
+            />
+          )}
 
-        {activeTab === "movement" && (
-          <MoveFormView
-            items={scopedItems}
-            currentUser={currentUser}
-            initialItem={movePrefill?.item || null}
-            initialType={movePrefill?.type || "out"}
-            onRecordTransaction={handleRecordTransaction}
-            onClearInitial={() => setMovePrefill(null)}
-          />
-        )}
+          {activeTab === "movement" && (
+            <MoveFormView
+              items={scopedItems}
+              currentUser={currentUser}
+              initialItem={movePrefill?.item || null}
+              initialType={movePrefill?.type || "out"}
+              onRecordTransaction={handleRecordTransaction}
+              onClearInitial={() => setMovePrefill(null)}
+            />
+          )}
 
-        {activeTab === "alerts" && (
-          <LowStockAlertsView
-            items={scopedItems}
-            transactions={scopedTransactions}
-            lines={uniqueLines}
-            currentUser={currentUser}
-            onSelectItem={(item) => setSelectedDetailItem(item)}
-            onQuickMove={handleQuickMove}
-            onCreatePurchaseOrder={handleCreatePurchaseOrder}
-            onNavigateToMonthly={() => setActiveTab("monthlyUsage")}
-          />
-        )}
+          {activeTab === "alerts" && (
+            <LowStockAlertsView
+              items={scopedItems}
+              transactions={scopedTransactions}
+              lines={uniqueLines}
+              currentUser={currentUser}
+              onSelectItem={(item) => setSelectedDetailItem(item)}
+              onQuickMove={handleQuickMove}
+              onCreatePurchaseOrder={handleCreatePurchaseOrder}
+              onNavigateToMonthly={() => setActiveTab("monthlyUsage")}
+            />
+          )}
 
-        {activeTab === "forecast" && (
-          <ForecastPlanningView
-            items={scopedItems}
-            transactions={scopedTransactions}
-            lines={uniqueLines}
-            categories={uniqueCategories}
-            currentUser={currentUser}
-            onSelectItem={(item) => setSelectedDetailItem(item)}
-            onQuickMove={handleQuickMove}
-            onCreatePurchaseOrder={handleCreatePurchaseOrder}
-          />
-        )}
-
-        {activeTab === "purchaseOrders" && (
-          <PurchaseOrdersView
-            currentUser={currentUser}
-            items={scopedItems}
-            transactions={scopedTransactions}
-            initialNewOrder={initialNewOrder}
-            onClearInitialNewOrder={() => setInitialNewOrder(null)}
-            onRefreshStock={() => performSync(true, true)}
-          />
-        )}
-
-        {activeTab === "monthlyUsage" && (
-          <div className="space-y-6 animate-in fade-in duration-200">
-            <MonthlyUsageReport
+          {activeTab === "forecast" && (
+            <ForecastPlanningView
               items={scopedItems}
               transactions={scopedTransactions}
               lines={uniqueLines}
               categories={uniqueCategories}
+              currentUser={currentUser}
               onSelectItem={(item) => setSelectedDetailItem(item)}
+              onQuickMove={handleQuickMove}
+              onCreatePurchaseOrder={handleCreatePurchaseOrder}
             />
-          </div>
-        )}
+          )}
 
-        {activeTab === "reports" && (
-          <ReportsView
-            data={syncData}
-            items={scopedItems}
-            transactions={scopedTransactions}
-            currentUser={currentUser}
-          />
-        )}
+          {activeTab === "purchaseOrders" && (
+            <PurchaseOrdersView
+              currentUser={currentUser}
+              items={scopedItems}
+              transactions={scopedTransactions}
+              initialNewOrder={initialNewOrder}
+              onClearInitialNewOrder={() => setInitialNewOrder(null)}
+              onRefreshStock={() => performSync(true, true)}
+            />
+          )}
 
-        {activeTab === "employees" && (
-          <EmployeesView
-            employees={employees}
-            currentUser={currentUser}
-            availableLines={allUniqueLines}
-            availableSuppliers={allUniqueSuppliers}
-            onSaveEmployees={handleSaveEmployees}
-            onRefreshEmployees={syncEmployees}
-          />
-        )}
+          {activeTab === "monthlyUsage" && (
+            <div className="space-y-6 animate-in fade-in duration-200">
+              <MonthlyUsageReport
+                items={scopedItems}
+                transactions={scopedTransactions}
+                lines={uniqueLines}
+                categories={uniqueCategories}
+                onSelectItem={(item) => setSelectedDetailItem(item)}
+              />
+            </div>
+          )}
 
-        {activeTab === "backup" && (
-          <BackupExportView
-            data={syncData}
-            items={items}
-            transactions={transactions}
-            isSyncing={isSyncing}
-            onSync={() => performSync(true)}
-            onRestoreBackup={handleRestoreBackup}
-          />
-        )}
+          {activeTab === "reports" && (
+            <ReportsView
+              data={syncData}
+              items={scopedItems}
+              transactions={scopedTransactions}
+              currentUser={currentUser}
+            />
+          )}
 
-        {activeTab === "settings" && (
-          <ThemeSettingsView currentUser={currentUser} />
-        )}
+          {activeTab === "employees" && (
+            <EmployeesView
+              employees={employees}
+              currentUser={currentUser}
+              availableLines={allUniqueLines}
+              availableSuppliers={allUniqueSuppliers}
+              onSaveEmployees={handleSaveEmployees}
+              onRefreshEmployees={syncEmployees}
+            />
+          )}
+
+          {activeTab === "backup" && (
+            <BackupExportView
+              data={syncData}
+              items={items}
+              transactions={transactions}
+              isSyncing={isSyncing}
+              onSync={() => performSync(true)}
+              onRestoreBackup={handleRestoreBackup}
+            />
+          )}
+
+          {activeTab === "settings" && (
+            <ThemeSettingsView currentUser={currentUser} />
+          )}
+        </ViewErrorBoundary>
       </main>
 
       {/* Item Details Modal */}
@@ -735,7 +906,7 @@ export default function App() {
           item={selectedDetailItem}
           currentUser={currentUser}
           onClose={() => setSelectedDetailItem(null)}
-          transactions={transactions}
+          transactions={scopedTransactions}
           onQuickMove={handleQuickMove}
         />
       )}

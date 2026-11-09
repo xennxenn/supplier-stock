@@ -110,57 +110,64 @@ export async function fetchSheetsDataDirect(): Promise<SheetsSyncData> {
   });
   const txRows = parsedTx.data.slice(1);
 
-  const transactions: Transaction[] = txRows
-    .map((r, index) => {
-      const date = (r[0] || "").trim();
-      const barcode = (r[1] || "").trim();
-      const itemName = (r[2] || "").trim();
-      const unit = (r[3] || "").trim();
-      const qtyIn = parseNum(r[4]);
-      const qtyOut = parseNum(r[5]);
-      const employeeId = (r[6] || "").trim();
-      const employeeName = (r[7] || "").trim();
-      const line = (r[8] || "").trim();
-      const unitPrice = parseNum(r[9]);
-      const totalCost = parseNum(r[10]);
-      let month = parseNum(r[11]);
-      let year = parseNum(r[12]);
+  const transactions: Transaction[] = [];
+  for (let index = 0; index < txRows.length; index++) {
+    const r = txRows[index];
+    const date = (r[0] || "").trim();
+    const barcode = (r[1] || "").trim();
+    const itemName = (r[2] || "").trim();
+    const qtyIn = parseNum(r[4]);
+    const qtyOut = parseNum(r[5]);
 
-      if (!month || !year) {
-        const parsedTime = parseFlexibleDate(date);
-        if (parsedTime > 0) {
-          const d = new Date(parsedTime);
-          if (!month) month = d.getMonth() + 1;
-          if (!year) year = d.getFullYear();
-        }
-      }
+    if ((qtyIn <= 0 && qtyOut <= 0) || !barcode || barcode === "0") {
+      continue;
+    }
 
-      const balance = parseNum(r[13]);
-      const minStock = parseNum(r[14]);
-      const status = (r[15] || "").trim();
+    const unit = (r[3] || "").trim();
+    const employeeId = (r[6] || "").trim();
+    const employeeName = (r[7] || "").trim();
+    const line = (r[8] || "").trim();
+    const unitPrice = parseNum(r[9]);
+    const totalCost = parseNum(r[10]);
+    let month = parseNum(r[11]);
+    let year = parseNum(r[12]);
 
-      return {
-        id: `tx_${index}`,
-        date,
-        barcode,
-        itemName,
-        unit,
-        qtyIn,
-        qtyOut,
-        employeeId,
-        employeeName,
-        line,
-        unitPrice,
-        totalCost,
-        month,
-        year,
-        balance,
-        minStock,
-        status,
-        type: qtyIn > 0 ? ("in" as const) : ("out" as const),
-      };
-    })
-    .filter((t) => t.barcode !== "" || t.itemName !== "");
+    if (year > 2400) year -= 543;
+    const parsedTime = parseFlexibleDate(date, year, month);
+    if ((!month || month < 1 || month > 12 || !year || year < 2000) && parsedTime > 0) {
+      const d = new Date(parsedTime);
+      month = d.getMonth() + 1;
+      year = d.getFullYear();
+    }
+
+    const balance = parseNum(r[13]);
+    const minStock = parseNum(r[14]);
+    const status = (r[15] || "").trim();
+
+    transactions.push({
+      id: `tx_${index}`,
+      date,
+      barcode,
+      itemName,
+      unit,
+      qtyIn,
+      qtyOut,
+      employeeId,
+      employeeName,
+      line,
+      unitPrice,
+      totalCost,
+      month,
+      year,
+      balance,
+      minStock,
+      status,
+      type: qtyIn > 0 ? ("in" as const) : ("out" as const),
+      timestamp: parsedTime + index * 0.001,
+    });
+  }
+
+  transactions.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
   const totalValue = stockItems.reduce(
     (sum, item) => sum + item.currentBalance * item.unitCost,

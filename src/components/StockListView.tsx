@@ -20,14 +20,22 @@ import {
   FileSpreadsheet,
   Coins,
   Boxes,
+  TrendingDown,
+  Calendar,
 } from "lucide-react";
-import type { StockItem, Employee } from "../types";
+import type { StockItem, Employee, Transaction } from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
 import { matchesLine, matchesExactOrToken } from "../utils/filterUtils";
+import {
+  extractAllMonths,
+  selectTargetMonths,
+  computeItemUsageMap,
+} from "../utils/usageUtils";
 
 interface StockListViewProps {
   items: StockItem[];
+  transactions?: Transaction[];
   currentUser?: Employee;
   onSelectItem: (item: StockItem) => void;
   onQuickMove: (item: StockItem, type: "in" | "out") => void;
@@ -43,12 +51,14 @@ type StockSortField =
   | "forwardBalance"
   | "qty"
   | "minStock"
+  | "avgUsage"
   | "cost"
   | "value"
   | "status";
 
 export const StockListView: React.FC<StockListViewProps> = ({
   items,
+  transactions = [],
   currentUser,
   onSelectItem,
   onQuickMove,
@@ -64,6 +74,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
   const [selectedLine, setSelectedLine] = useState("all");
   const [selectedSupplier, setSelectedSupplier] = useState("all");
   const [stockStatusFilter, setStockStatusFilter] = useState<"all" | "low" | "out" | "ok">("all");
+  const [usageMonthsPeriod, setUsageMonthsPeriod] = useState<6 | 12 | 24 | 0>(12);
   const [sortField, setSortField] = useState<StockSortField>("barcode");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
   const INITIAL_BATCH = 60;
@@ -72,6 +83,24 @@ export const StockListView: React.FC<StockListViewProps> = ({
   const [showAllDirectly, setShowAllDirectly] = useState<boolean>(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Compute monthly usage per item for the selected period
+  const allMonths = useMemo(() => extractAllMonths(transactions), [transactions]);
+  const targetUsageMonths = useMemo(
+    () => selectTargetMonths(allMonths, usageMonthsPeriod),
+    [allMonths, usageMonthsPeriod]
+  );
+  const itemUsageMap = useMemo(
+    () => computeItemUsageMap(transactions, targetUsageMonths),
+    [transactions, targetUsageMonths]
+  );
+
+  const usagePeriodLabel = useMemo(() => {
+    if (usageMonthsPeriod === 6) return "6 เดือน";
+    if (usageMonthsPeriod === 12) return "1 ปี";
+    if (usageMonthsPeriod === 24) return "2 ปี";
+    return `ทั้งหมด (${targetUsageMonths.length} ด.)`;
+  }, [usageMonthsPeriod, targetUsageMonths.length]);
 
   // Extract unique suppliers
   const uniqueSuppliers = useMemo(() => {
@@ -153,6 +182,12 @@ export const StockListView: React.FC<StockListViewProps> = ({
         case "minStock":
           res = (a.minStock || 0) - (b.minStock || 0);
           break;
+        case "avgUsage": {
+          const uA = itemUsageMap.get(a.barcode.trim().toLowerCase())?.avgMonthlyOut || 0;
+          const uB = itemUsageMap.get(b.barcode.trim().toLowerCase())?.avgMonthlyOut || 0;
+          res = uA - uB;
+          break;
+        }
         case "cost":
           res = a.unitCost - b.unitCost;
           break;
@@ -170,14 +205,14 @@ export const StockListView: React.FC<StockListViewProps> = ({
       }
       return sortOrder === "asc" ? res : -res;
     });
-  }, [filteredItems, sortField, sortOrder]);
+  }, [filteredItems, sortField, sortOrder, itemUsageMap]);
 
   const handleHeaderSort = (field: StockSortField) => {
     if (sortField === field) {
       setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
     } else {
       setSortField(field);
-      if (["qty", "forwardBalance", "minStock", "cost", "value"].includes(field)) {
+      if (["qty", "forwardBalance", "minStock", "avgUsage", "cost", "value"].includes(field)) {
         setSortOrder("desc");
       } else {
         setSortOrder("asc");
@@ -208,6 +243,15 @@ export const StockListView: React.FC<StockListViewProps> = ({
   const totalFilteredLowStock = useMemo(() => {
     return sortedItems.filter((i) => i.currentBalance <= i.minStock && i.minStock > 0).length;
   }, [sortedItems]);
+
+  const totalFilteredAvgMonthlyOut = useMemo(() => {
+    let sum = 0;
+    for (const item of sortedItems) {
+      const u = itemUsageMap.get(item.barcode.trim().toLowerCase());
+      if (u) sum += u.avgMonthlyOut;
+    }
+    return parseFloat(sum.toFixed(1));
+  }, [sortedItems, itemUsageMap]);
 
   // Reset visible count when filters or sorting change
   useEffect(() => {
@@ -260,6 +304,9 @@ export const StockListView: React.FC<StockListViewProps> = ({
       "คงเหลือยกยอด",
       "คงเหลือปัจจุบัน",
       "Min Stock",
+      `ใช้เฉลี่ย/เดือน (${usagePeriodLabel})`,
+      `ยอดจ่ายออกรวม (${usagePeriodLabel})`,
+      `ยอดรับเข้ารวม (${usagePeriodLabel})`,
       "ราคาต่อหน่วย",
       "มูลค่ารวม (บาท)",
       "Supplier",
@@ -267,25 +314,31 @@ export const StockListView: React.FC<StockListViewProps> = ({
       "สถานะ",
     ];
 
-    const rows = sortedItems.map((it) => [
-      it.barcode || "",
-      it.name || "",
-      it.category || "",
-      it.unit || "",
-      it.line || "",
-      it.forwardBalance || 0,
-      it.currentBalance || 0,
-      it.minStock || 0,
-      it.unitCost || 0,
-      parseFloat(((it.currentBalance || 0) * (it.unitCost || 0)).toFixed(2)),
-      it.supplier || "",
-      it.location || "",
-      it.currentBalance <= 0
-        ? "หมดสต็อก"
-        : it.currentBalance <= it.minStock
-        ? "ต่ำกว่าเกณฑ์"
-        : "ปกติ",
-    ]);
+    const rows = sortedItems.map((it) => {
+      const u = itemUsageMap.get(it.barcode.trim().toLowerCase());
+      return [
+        it.barcode || "",
+        it.name || "",
+        it.category || "",
+        it.unit || "",
+        it.line || "",
+        it.forwardBalance || 0,
+        it.currentBalance || 0,
+        it.minStock || 0,
+        u?.avgMonthlyOut || 0,
+        u?.periodOut || 0,
+        u?.periodIn || 0,
+        it.unitCost || 0,
+        parseFloat(((it.currentBalance || 0) * (it.unitCost || 0)).toFixed(2)),
+        it.supplier || "",
+        it.location || "",
+        it.currentBalance <= 0
+          ? "หมดสต็อก"
+          : it.currentBalance <= it.minStock
+          ? "ต่ำกว่าเกณฑ์"
+          : "ปกติ",
+      ];
+    });
 
     return { headers, rows };
   };
@@ -311,7 +364,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
             พบทั้งหมด <span className="font-bold text-slate-800">{sortedItems.length.toLocaleString()}</span> จาก{" "}
-            {items.length.toLocaleString()} รายการ (แสดงต่อเนื่องหน้าเดียว เลื่อนดูได้เรื่อยๆ)
+            {items.length.toLocaleString()} รายการ (คลิกหรือดับเบิ้ลคลิกที่รายการเพื่อดูประวัติรับเข้า-จ่ายออกทั้งหมด)
           </p>
         </div>
 
@@ -338,7 +391,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
       </div>
 
       {/* Dynamic KPI summary cards that change with filter */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
           <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
             <span>รายการสินค้าที่เลือก (SKUs)</span>
@@ -359,6 +412,17 @@ export const StockListView: React.FC<StockListViewProps> = ({
           </div>
         </div>
 
+        <div className="bg-white p-4 rounded-xl border border-sky-200 bg-sky-50/30 shadow-sm">
+          <div className="flex items-center justify-between text-xs text-sky-700 font-medium mb-1">
+            <span>ใช้เฉลี่ย/เดือน ({usagePeriodLabel})</span>
+            <TrendingDown className="w-4 h-4 text-sky-600" />
+          </div>
+          <div className="text-lg font-bold text-sky-700 font-mono">
+            {totalFilteredAvgMonthlyOut.toLocaleString()}{" "}
+            <span className="text-xs font-normal text-sky-600">หน่วย/ด.</span>
+          </div>
+        </div>
+
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
           <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
             <span>มูลค่าสต็อกรวม (ที่เลือก)</span>
@@ -369,7 +433,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
           </div>
         </div>
 
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm col-span-2 lg:col-span-1">
           <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
             <span>สินค้าต้องสั่งซื้อ / ต่ำกว่า Min</span>
             <AlertTriangle className="w-4 h-4 text-amber-500" />
@@ -444,7 +508,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
           </div>
         </div>
 
-        {/* Status pill toggles & Sort options */}
+        {/* Status pill toggles, Usage period selector & Sort options */}
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 text-xs">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-slate-500 mr-1">สถานะสต็อก:</span>
@@ -491,7 +555,31 @@ export const StockListView: React.FC<StockListViewProps> = ({
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Period Selector for Average Monthly Usage */}
+            <div className="flex items-center gap-1 bg-sky-50 border border-sky-200/80 rounded-lg px-2 py-0.5">
+              <Calendar className="w-3.5 h-3.5 text-sky-600" />
+              <span className="text-[11px] text-sky-800 font-medium">คำนวณใช้เฉลี่ย:</span>
+              {([
+                { value: 6, label: "6 ด." },
+                { value: 12, label: "1 ปี" },
+                { value: 24, label: "2 ปี" },
+                { value: 0, label: "ทั้งหมด" },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setUsageMonthsPeriod(opt.value)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-semibold transition cursor-pointer ${
+                    usageMonthsPeriod === opt.value
+                      ? "bg-sky-600 text-white shadow-2xs"
+                      : "text-sky-700 hover:bg-sky-100"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
             <span className="text-slate-500">เรียงตาม:</span>
             <select
               value={sortField}
@@ -501,6 +589,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
               <option value="barcode">บาร์โค้ด</option>
               <option value="name">ชื่อสินค้า</option>
               <option value="qty">คงเหลือ</option>
+              <option value="avgUsage">ใช้เฉลี่ย/เดือน</option>
               <option value="cost">ราคาต่อหน่วย</option>
               <option value="value">มูลค่ารวม</option>
             </select>
@@ -546,7 +635,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
                 </th>
                 <th
                   onClick={() => handleHeaderSort("name")}
-                  className="p-3 min-w-[240px] cursor-pointer hover:bg-slate-200 transition group text-slate-800"
+                  className="p-3 min-w-[220px] cursor-pointer hover:bg-slate-200 transition group text-slate-800"
                   title="คลิกเพื่อเรียงตาม ชื่อรายการสินค้า"
                 >
                   <div className="flex items-center gap-1">
@@ -595,6 +684,19 @@ export const StockListView: React.FC<StockListViewProps> = ({
                   </div>
                 </th>
                 <th
+                  onClick={() => handleHeaderSort("avgUsage")}
+                  className="p-3 text-right font-bold text-sky-700 bg-sky-50/60 cursor-pointer hover:bg-sky-100/70 transition group"
+                  title={`คลิกเพื่อเรียงตาม การใช้งานเฉลี่ยต่อเดือน (${usagePeriodLabel})`}
+                >
+                  <div className="flex items-center justify-end gap-1">
+                    <span>ใช้เฉลี่ย/เดือน</span>
+                    {renderSortIcon("avgUsage")}
+                  </div>
+                  <div className="text-[10px] font-normal text-sky-600 text-right">
+                    ({usagePeriodLabel})
+                  </div>
+                </th>
+                <th
                   onClick={() => handleHeaderSort("minStock")}
                   className="p-3 text-right cursor-pointer hover:bg-slate-200 transition group text-slate-700"
                   title="คลิกเพื่อเรียงตาม Min Stock"
@@ -640,7 +742,7 @@ export const StockListView: React.FC<StockListViewProps> = ({
             <tbody className="divide-y divide-slate-100">
               {displayedItems.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="text-center py-12 text-slate-400 text-sm">
+                  <td colSpan={13} className="text-center py-12 text-slate-400 text-sm">
                     ไม่พบรายการสินค้าที่ตรงกับเงื่อนไขการค้นหา
                   </td>
                 </tr>
@@ -650,11 +752,15 @@ export const StockListView: React.FC<StockListViewProps> = ({
                   const isLow = item.currentBalance <= item.minStock && item.minStock > 0;
                   const isOut = item.currentBalance <= 0;
                   const totalVal = item.currentBalance * item.unitCost;
+                  const usageStats = itemUsageMap.get(item.barcode.trim().toLowerCase());
+                  const avgMonthlyOut = usageStats?.avgMonthlyOut || 0;
+                  const periodOut = usageStats?.periodOut || 0;
 
                   return (
                     <tr
                       key={`${item.id || item.barcode}_${idx}`}
                       onClick={() => onSelectItem(item)}
+                      onDoubleClick={() => onSelectItem(item)}
                       style={{ contentVisibility: "auto", containIntrinsicSize: "1px 48px" }}
                       className="hover:bg-amber-50/40 transition cursor-pointer group"
                     >
@@ -711,6 +817,23 @@ export const StockListView: React.FC<StockListViewProps> = ({
                         <span className="text-[10px] text-slate-400 ml-1">
                           {item.unit}
                         </span>
+                      </td>
+                      <td className="p-3 text-right bg-sky-50/30">
+                        {avgMonthlyOut > 0 ? (
+                          <div>
+                            <span className="font-mono text-sm font-bold text-sky-700">
+                              {avgMonthlyOut.toLocaleString()}
+                            </span>
+                            <span className="text-[10px] text-sky-600 ml-1">
+                              {item.unit}/ด.
+                            </span>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              รวม {periodOut.toLocaleString()}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="font-mono text-xs text-slate-300">-</span>
+                        )}
                       </td>
                       <td className="p-3 text-right font-mono text-slate-600">
                         {item.minStock?.toLocaleString() || "0"}

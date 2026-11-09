@@ -79,5 +79,12 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   console.error("Firestore Error: ", JSON.stringify(errInfo));
 }
 
+export function getOrderStatusDocId(barcode: string): string {
+  const clean = String(barcode || "").trim();
+  if (!clean) return "unknown_barcode";
+  return clean.replace(/\//g, "_SLASH_");
+}
+
 export { doc, onSnapshot, setDoc, deleteDoc, getDocs, updateDoc, writeBatch };
+
 

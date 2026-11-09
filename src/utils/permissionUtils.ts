@@ -211,16 +211,36 @@ export function isLineAllowed(
  */
 export function isSupplierAllowed(
   supplier: string | undefined | null,
-  allowedSuppliers: string[] | undefined | null
+  allowedSuppliers: string[] | undefined | null,
+  hasExplicitLineMatch = false
 ): boolean {
   if (!allowedSuppliers || allowedSuppliers.length === 0 || allowedSuppliers.includes("ALL")) {
     return true;
   }
-  if (!supplier || !supplier.trim()) {
-    return false;
+  const clean = typeof supplier === "string" ? supplier.trim() : "";
+  if (!clean || clean === "-") {
+    // Items that do not have a supplier recorded in Google Sheets (e.g. อุปกรณ์สำนักงาน, อะไหล่เย็บ)
+    // should remain visible if the item's production line is explicitly permitted for the user.
+    return hasExplicitLineMatch;
   }
 
-  return matchesExactOrTokenMulti(supplier, allowedSuppliers);
+  return matchesExactOrTokenMulti(clean, allowedSuppliers);
+}
+
+/**
+ * Check if a user has any explicit line or supplier restriction configured
+ */
+export function hasExplicitDataScope(user: Employee | null | undefined): boolean {
+  if (!user) return false;
+  const hasLineScope =
+    Array.isArray(user.allowedLines) &&
+    user.allowedLines.length > 0 &&
+    !user.allowedLines.includes("ALL");
+  const hasSupplierScope =
+    Array.isArray(user.allowedSuppliers) &&
+    user.allowedSuppliers.length > 0 &&
+    !user.allowedSuppliers.includes("ALL");
+  return hasLineScope || hasSupplierScope;
 }
 
 /**
@@ -230,12 +250,13 @@ export function getScopedStockItems(
   items: StockItem[],
   user: Employee | null | undefined
 ): StockItem[] {
-  if (!user || user.role === "admin") return items;
+  if (!user || !hasExplicitDataScope(user)) return items;
 
   return items.filter((item) => {
     const lineOk = isLineAllowed(item.line, user.allowedLines);
-    const supOk = isSupplierAllowed(item.supplier, user.allowedSuppliers);
-    return lineOk && supOk;
+    if (!lineOk) return false;
+    const supOk = isSupplierAllowed(item.supplier, user.allowedSuppliers, true);
+    return supOk;
   });
 }
 
@@ -248,19 +269,38 @@ export function getScopedTransactions(
   items: StockItem[],
   user: Employee | null | undefined
 ): Transaction[] {
-  if (!user || user.role === "admin") return transactions;
+  if (!user || !hasExplicitDataScope(user)) return transactions;
 
-  const itemMap = new Map(
-    items.map((it) => [it.barcode.trim().toLowerCase(), it])
-  );
+  const itemMap = new Map<string, { lines: string; suppliers: string }>();
+  for (const it of items) {
+    const key = String(it.barcode || "").trim().toLowerCase();
+    if (!key) continue;
+    const existing = itemMap.get(key);
+    if (!existing) {
+      itemMap.set(key, {
+        lines: it.line || "",
+        suppliers: it.supplier || "",
+      });
+    } else {
+      if (it.line && !existing.lines.includes(it.line)) {
+        existing.lines = existing.lines ? `${existing.lines},${it.line}` : it.line;
+      }
+      if (it.supplier && !existing.suppliers.includes(it.supplier)) {
+        existing.suppliers = existing.suppliers ? `${existing.suppliers},${it.supplier}` : it.supplier;
+      }
+    }
+  }
 
   return transactions.filter((tx) => {
-    const masterItem = itemMap.get(tx.barcode.trim().toLowerCase());
-    const effectiveLine = tx.line || masterItem?.line || "";
-    const effectiveSupplier = masterItem?.supplier || "";
+    const bKey = String(tx.barcode || "").trim().toLowerCase();
+    const masterMeta = itemMap.get(bKey);
+    const effectiveLine = tx.line?.trim() || masterMeta?.lines || "";
+    const effectiveSupplier = masterMeta?.suppliers || "";
 
     const lineOk = isLineAllowed(effectiveLine, user.allowedLines);
-    const supOk = isSupplierAllowed(effectiveSupplier, user.allowedSuppliers);
-    return lineOk && supOk;
+    if (!lineOk) return false;
+    const supOk = isSupplierAllowed(effectiveSupplier, user.allowedSuppliers, true);
+    return supOk;
   });
 }
+

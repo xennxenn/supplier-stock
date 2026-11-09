@@ -1,6 +1,12 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useDeferredValue, useRef } from "react";
 import { onSnapshot, setDoc, doc, deleteDoc, writeBatch } from "firebase/firestore";
-import { orderStatusCol, db } from "../lib/firebase";
+import {
+  orderStatusCol,
+  db,
+  getOrderStatusDocId,
+  handleFirestoreError,
+  OperationType,
+} from "../lib/firebase";
 import {
   TrendingUp,
   Calendar,
@@ -9,24 +15,16 @@ import {
   AlertTriangle,
   Package,
   Layers,
-  ChevronRight,
   Calculator,
   Clock,
   CircleDollarSign,
-  ArrowUpRight,
-  ShieldCheck,
   CheckCircle2,
   Sparkles,
-  Info,
   FileSpreadsheet,
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
-  Trash2,
-  Tag,
-  BookmarkCheck,
   AlertCircle,
-  X,
   Boxes,
 } from "lucide-react";
 import {
@@ -38,10 +36,18 @@ import {
   Tooltip,
   Legend,
 } from "recharts";
-import type { StockItem, Transaction, ForecastItem, Employee, OrderStatus, PurchaseOrderItem } from "../types";
+import type {
+  StockItem,
+  Transaction,
+  ForecastItem,
+  Employee,
+  OrderStatus,
+  PurchaseOrderItem,
+} from "../types";
 import { exportToExcel, exportToCSV } from "../utils/exportUtils";
 import { hasPermission } from "../utils/permissionUtils";
 import { matchesLineMulti, matchesExactOrTokenMulti } from "../utils/filterUtils";
+import { computeBurnRateData } from "../utils/usageUtils";
 import { OrderLotManager } from "./OrderLotManager";
 import { MultiSelectFilter } from "./MultiSelectFilter";
 
@@ -72,6 +78,9 @@ type ForecastSortField =
   | "estimatedCost"
   | "risk";
 
+const INITIAL_BATCH = 50;
+const BATCH_INCREMENT = 60;
+
 export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   items,
   transactions,
@@ -84,19 +93,41 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 }) => {
   const canReceive = hasPermission(currentUser, "receive");
   const canExport = hasPermission(currentUser, "importExport");
-  // Forecast horizon in months (3, 6, 9, 12)
+  const canManageOrderStatus = hasPermission(currentUser, "manageOrderStatus");
+
   const [forecastHorizon, setForecastHorizon] = useState<3 | 6 | 9 | 12>(6);
-  const [bufferPercent, setBufferPercent] = useState<number>(10); // +10% default growth/safety buffer
+  const [bufferPercent, setBufferPercent] = useState<number>(10);
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+
   const [selectedLines, setSelectedLines] = useState<string[]>([]);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [selectedSuppliers, setSelectedSuppliers] = useState<string[]>([]);
-  const [selectedRisk, setSelectedRisk] = useState<"all" | "critical" | "warning" | "ok" | "overstock">("all");
-  const [filterOrderStatus, setFilterOrderStatus] = useState<"all" | "ordered" | "not_ordered">("all");
+  const [selectedRisk, setSelectedRisk] = useState<
+    "all" | "critical" | "warning" | "ok" | "overstock"
+  >("all");
+  const [filterOrderStatus, setFilterOrderStatus] = useState<
+    "all" | "ordered" | "not_ordered"
+  >("all");
   const [sortField, setSortField] = useState<ForecastSortField>("estimatedCost");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
-  const canManageOrderStatus = hasPermission(currentUser, "manageOrderStatus");
+  const [visibleCount, setVisibleCount] = useState<number>(INITIAL_BATCH);
+  const [showAllDirectly, setShowAllDirectly] = useState<boolean>(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  // Defer Recharts SVG mounting by 1 animation frame so table & KPIs render in <15ms
+  const [isChartReady, setIsChartReady] = useState<boolean>(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setIsChartReady(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  const [notice, setNotice] = useState<{ type: "ok" | "error"; text: string } | null>(null);
+  const showNotice = (text: string, type: "ok" | "error" = "error") => {
+    setNotice({ type, text });
+    setTimeout(() => setNotice(null), 4000);
+  };
 
   const [orderStatuses, setOrderStatuses] = useState<OrderStatus[]>([]);
   const [activeLotNumber, setActiveLotNumber] = useState<string>(() => {
@@ -117,36 +148,47 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
   const [selectedLotToClear, setSelectedLotToClear] = useState<string>("");
   const [isClearing, setIsClearing] = useState<boolean>(false);
 
-  // Calculate items count per Lot
-  const lotStats = useMemo(() => {
-    const counts = new Map<string, number>();
-    orderStatuses.forEach((s) => {
-      if (s.isOrdered) {
-        const lot = s.lotNumber && s.lotNumber.trim() !== "" ? s.lotNumber.trim() : "ไม่ระบุ Lot";
-        counts.set(lot, (counts.get(lot) || 0) + 1);
+  // O(1) lookup map for orderStatuses by barcode
+  const orderStatusMap = useMemo(() => {
+    const map = new Map<string, OrderStatus>();
+    for (let i = 0; i < orderStatuses.length; i++) {
+      const s = orderStatuses[i];
+      if (s && s.barcode) {
+        map.set(String(s.barcode).trim(), s);
       }
-    });
-    return counts;
+    }
+    return map;
   }, [orderStatuses]);
 
-  const uniqueLots = useMemo(() => {
-    return Array.from(lotStats.keys()).sort();
-  }, [lotStats]);
+  useEffect(() => {
+    const unsubscribe = onSnapshot(
+      orderStatusCol,
+      (snapshot) => {
+        const statuses = snapshot.docs.map((d) => d.data() as OrderStatus);
+        setOrderStatuses(statuses);
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.LIST, "orderStatuses");
+      }
+    );
+    return () => unsubscribe();
+  }, []);
 
   const handleSaveActiveLot = () => {
     if (!canManageOrderStatus) {
-      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
+      showNotice("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
       return;
     }
-    const trimmed = lotInput.trim();
+    const trimmed = String(lotInput || "").trim();
     if (!trimmed) {
-      alert("กรุณาระบุ หรือเลือกเลขที่ Lot การสั่งซื้อก่อนกดบันทึก");
+      showNotice("กรุณาระบุ หรือเลือกเลขที่ Lot การสั่งซื้อก่อนกดบันทึก");
       return;
     }
     setActiveLotNumber(trimmed);
     try {
       localStorage.setItem("pasaya_active_order_lot", trimmed);
     } catch {}
+    showNotice(`บันทึกและเปิดใช้งานรอบ Lot "${trimmed}" เรียบร้อยแล้ว`, "ok");
   };
 
   const handleUnlockLot = () => {
@@ -159,65 +201,99 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
   const handleToggleOrderStatus = async (barcode: string, checked: boolean) => {
     if (!canManageOrderStatus) {
-      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
+      showNotice("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์");
       return;
     }
     if (!activeLotNumber) {
-      alert("กรุณาสร้างหรือเลือกเลขที่ Lot และกดปุ่ม 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ");
+      showNotice(
+        "กรุณาสร้างหรือเลือกเลขที่ Lot และกดปุ่ม 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ"
+      );
       return;
     }
-    try {
-      const ref = doc(db, "orderStatuses", barcode);
-      if (checked) {
-        await setDoc(ref, {
-          barcode,
+    const cleanBarcode = String(barcode || "").trim();
+    if (!cleanBarcode) return;
+
+    const updatedAt = new Date().toISOString();
+    setOrderStatuses((prev) => {
+      const without = prev.filter((s) => String(s?.barcode || "").trim() !== cleanBarcode);
+      if (!checked) return without;
+      return [
+        ...without,
+        {
+          barcode: cleanBarcode,
           isOrdered: true,
           lotNumber: activeLotNumber,
-          updatedAt: new Date().toISOString(),
+          updatedAt,
+        },
+      ];
+    });
+
+    try {
+      const ref = doc(db, "orderStatuses", getOrderStatusDocId(cleanBarcode));
+      if (checked) {
+        await setDoc(ref, {
+          barcode: cleanBarcode,
+          isOrdered: true,
+          lotNumber: activeLotNumber,
+          updatedAt,
         });
         fetch("/api/order-status", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ barcode, isOrdered: true, lotNumber: activeLotNumber }),
+          body: JSON.stringify({
+            barcode: cleanBarcode,
+            isOrdered: true,
+            lotNumber: activeLotNumber,
+          }),
         }).catch((err) => console.warn("Sync order status fallback:", err));
       } else {
         await deleteDoc(ref);
         fetch("/api/order-status", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ barcode, isOrdered: false, lotNumber: "" }),
+          body: JSON.stringify({
+            barcode: cleanBarcode,
+            isOrdered: false,
+            lotNumber: "",
+          }),
         }).catch((err) => console.warn("Sync order status fallback:", err));
       }
     } catch (err) {
       console.error("Error updating order status:", err);
-      alert("เกิดข้อผิดพลาดในการบันทึกข้อมูล กรุณาลองใหม่อีกครั้ง");
+      showNotice("เกิดข้อผิดพลาดในการบันทึกข้อมูล กรุณาลองใหม่อีกครั้ง");
     }
   };
 
   const handleClearLot = async (targetLot: string) => {
     if (!canManageOrderStatus) {
-      alert("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบ");
+      showNotice("คุณไม่มีสิทธิ์จัดการรอบสั่งซื้อ กรุณาติดต่อผู้ดูแลระบบ");
       return;
     }
     if (!targetLot) return;
 
     setIsClearing(true);
     try {
-      const cleanTarget = targetLot.trim().toLowerCase();
+      const cleanTarget = String(targetLot).trim().toLowerCase();
       const isMatch = (s: OrderStatus) => {
-        if (!s.isOrdered) return false;
+        if (!s || !s.isOrdered) return false;
+        const sLot =
+          typeof s.lotNumber === "string"
+            ? s.lotNumber.trim()
+            : String(s.lotNumber || "").trim();
         if (cleanTarget === "__all__") return true;
         if (cleanTarget === "ไม่ระบุ lot" || cleanTarget === "unspecified") {
-          return !s.lotNumber || s.lotNumber.trim() === "";
+          return !sLot;
         }
-        return (s.lotNumber || "").trim().toLowerCase() === cleanTarget;
+        return sLot.toLowerCase() === cleanTarget;
       };
 
       const toDelete = orderStatuses.filter(isMatch);
 
       // 1. Optimistic UI update immediately
-      const toDeleteBarcodes = new Set(toDelete.map((s) => s.barcode));
-      setOrderStatuses((prev) => prev.filter((s) => !toDeleteBarcodes.has(s.barcode)));
+      const toDeleteBarcodes = new Set(toDelete.map((s) => String(s.barcode || "").trim()));
+      setOrderStatuses((prev) =>
+        prev.filter((s) => !toDeleteBarcodes.has(String(s?.barcode || "").trim()))
+      );
 
       // 2. Delete in Firestore in chunks of 400
       if (toDelete.length > 0) {
@@ -225,7 +301,9 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
           const chunk = toDelete.slice(i, i + 400);
           const batch = writeBatch(db);
           chunk.forEach((s) => {
-            batch.delete(doc(db, "orderStatuses", s.barcode));
+            if (s.barcode) {
+              batch.delete(doc(db, "orderStatuses", getOrderStatusDocId(s.barcode)));
+            }
           });
           await batch.commit();
         }
@@ -241,7 +319,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
       // 4. Reset active lot if it was cleared
       if (
         cleanTarget === "__all__" ||
-        (activeLotNumber || "").trim().toLowerCase() === cleanTarget
+        String(activeLotNumber || "").trim().toLowerCase() === cleanTarget
       ) {
         setActiveLotNumber("");
         setLotInput("");
@@ -252,95 +330,61 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
       setShowClearLotModal(false);
       setSelectedLotToClear("");
+      showNotice("ล้างข้อมูลรอบการสั่งซื้อเรียบร้อยแล้ว", "ok");
     } catch (err) {
       console.error("Error clearing lot:", err);
-      alert("เกิดข้อผิดพลาดในการล้างข้อมูล Lot");
+      showNotice("เกิดข้อผิดพลาดในการล้างข้อมูล Lot");
     } finally {
       setIsClearing(false);
     }
   };
 
-  
-
-  useEffect(() => {
-    const unsubscribe = onSnapshot(orderStatusCol, (snapshot) => {
-      const statuses = snapshot.docs.map(doc => doc.data() as OrderStatus);
-      setOrderStatuses(statuses);
-    });
-    return () => unsubscribe();
-  }, []);
-
-
-  // Calculate historical monthly burn rate per SKU from transactions
-  // Determine date span of transactions
-  const { burnRateMap, monthsSpan } = useMemo(() => {
-    const usageMap = new Map<string, number>();
-    const monthKeySet = new Set<string>();
-
-    for (const t of transactions) {
-      if (t.qtyOut > 0) {
-        const b = t.barcode.trim().toLowerCase();
-        usageMap.set(b, (usageMap.get(b) || 0) + t.qtyOut);
-        if (t.year && t.month) {
-          monthKeySet.add(`${t.year}-${t.month}`);
-        }
-      }
-    }
-
-    // If monthKeySet is small or 0, default span to minimum 3 months
-    const calculatedSpan = Math.max(3, monthKeySet.size || 6);
-
-    const burnRates = new Map<string, number>();
-    usageMap.forEach((totalOut, barcode) => {
-      burnRates.set(barcode, totalOut / calculatedSpan);
-    });
-
-    return { burnRateMap: burnRates, monthsSpan: calculatedSpan };
-  }, [transactions]);
+  // WeakMap-cached monthly burn rate per SKU from transactions
+  const { burnRateMap, monthsSpan } = useMemo(
+    () => computeBurnRateData(transactions),
+    [transactions]
+  );
 
   // Extract unique suppliers
   const uniqueSuppliers = useMemo(() => {
     const set = new Set<string>();
     for (const it of items) {
-      if (it.supplier) set.add(it.supplier);
+      if (it.supplier && it.supplier.trim()) set.add(it.supplier.trim());
     }
-    return Array.from(set).sort();
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "th"));
   }, [items]);
 
   // Generate Forecast analysis for all items
   const forecastItems: ForecastItem[] = useMemo(() => {
     return items.map((item) => {
-      const bKey = item.barcode.trim().toLowerCase();
-      // Historical monthly average consumption
-      let monthlyBurnRate = burnRateMap.get(bKey) || 0;
+      const bKey = String(item.barcode || "").trim().toLowerCase();
+      const balance = item.currentBalance ?? 0;
+      const minStock = item.minStock ?? 0;
+      const unitCost = item.unitCost ?? 0;
 
-      // If no past transactions found in sheet, estimate baseline from minStock / 3
-      if (monthlyBurnRate === 0 && item.minStock > 0) {
-        monthlyBurnRate = Math.max(0.5, item.minStock / 3);
+      let monthlyBurnRate = burnRateMap.get(bKey) || 0;
+      if (monthlyBurnRate === 0 && minStock > 0) {
+        monthlyBurnRate = Math.max(0.5, minStock / 3);
       }
 
-      // Projected total demand over forecastHorizon
       const projectedDemand = Math.ceil(
         monthlyBurnRate * forecastHorizon * (1 + bufferPercent / 100)
       );
 
-      // Months of stock remaining
       const monthsOfStockRemaining =
-        monthlyBurnRate > 0 ? item.currentBalance / monthlyBurnRate : 999;
+        monthlyBurnRate > 0 ? balance / monthlyBurnRate : 999;
 
-      // Recommended order to cover projected demand + minStock safety target
-      const targetStockLevel = projectedDemand + item.minStock;
-      const deficit = Math.max(0, targetStockLevel - item.currentBalance);
+      const targetStockLevel = projectedDemand + minStock;
+      const deficit = Math.max(0, targetStockLevel - balance);
       const recommendedOrder = deficit;
-      const estimatedCost = recommendedOrder * item.unitCost;
+      const estimatedCost = recommendedOrder * unitCost;
 
-      // Risk classification
       let riskLevel: ForecastItem["riskLevel"] = "ok";
-      if (monthsOfStockRemaining < 1 || (item.currentBalance <= 0 && monthlyBurnRate > 0)) {
+      if (monthsOfStockRemaining < 1 || (balance <= 0 && monthlyBurnRate > 0)) {
         riskLevel = "critical";
       } else if (monthsOfStockRemaining < forecastHorizon) {
         riskLevel = "warning";
-      } else if (monthsOfStockRemaining > forecastHorizon * 2.5 && item.currentBalance > 50) {
+      } else if (monthsOfStockRemaining > forecastHorizon * 2.5 && balance > 50) {
         riskLevel = "overstock";
       }
 
@@ -357,14 +401,14 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
     });
   }, [items, burnRateMap, forecastHorizon, bufferPercent]);
 
-  // Filter items
-  const filteredItems = useMemo(() => {
+  // Step 1: Filter by search, line, category, supplier (decoupled from orderStatuses & selectedRisk)
+  const baseFilteredItems = useMemo(() => {
+    const q = deferredSearch.toLowerCase().trim();
     return forecastItems.filter((f) => {
-      if (search) {
-        const q = search.toLowerCase().trim();
-        const matchBarcode = f.item.barcode.toLowerCase().includes(q);
-        const matchName = f.item.name.toLowerCase().includes(q);
-        const matchSupplier = (f.item.supplier || "").toLowerCase().includes(q);
+      if (q) {
+        const matchBarcode = String(f.item.barcode || "").toLowerCase().includes(q);
+        const matchName = String(f.item.name || "").toLowerCase().includes(q);
+        const matchSupplier = String(f.item.supplier || "").toLowerCase().includes(q);
         if (!matchBarcode && !matchName && !matchSupplier) return false;
       }
 
@@ -380,16 +424,53 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
         if (!matchesExactOrTokenMulti(f.item.supplier, selectedSuppliers)) return false;
       }
 
-      if (selectedRisk !== "all" && f.riskLevel !== selectedRisk) return false;
-      
-      const oStatus = orderStatuses.find(s => s.barcode === f.item.barcode);
-      const isOrdered = oStatus?.isOrdered || false;
-      if (filterOrderStatus === "ordered" && !isOrdered) return false;
-      if (filterOrderStatus === "not_ordered" && isOrdered) return false;
-
       return true;
     });
-  }, [forecastItems, search, selectedLines, selectedCategories, selectedSuppliers, selectedRisk, filterOrderStatus, orderStatuses]);
+  }, [
+    forecastItems,
+    deferredSearch,
+    selectedLines,
+    selectedCategories,
+    selectedSuppliers,
+  ]);
+
+  // Step 2: Filter by orderStatus only when filterOrderStatus !== "all"
+  const preRiskFilteredItems = useMemo(() => {
+    if (filterOrderStatus === "all") return baseFilteredItems;
+    return baseFilteredItems.filter((f) => {
+      const oStatus = orderStatusMap.get(String(f.item.barcode || "").trim());
+      const isOrdered = Boolean(oStatus?.isOrdered);
+      return filterOrderStatus === "ordered" ? isOrdered : !isOrdered;
+    });
+  }, [baseFilteredItems, filterOrderStatus, orderStatusMap]);
+
+  // Risk counts computed BEFORE selectedRisk filter so risk filter badges remain accurate
+  const riskCounts = useMemo(() => {
+    let critical = 0;
+    let warning = 0;
+    let ok = 0;
+    let overstock = 0;
+    for (let i = 0; i < preRiskFilteredItems.length; i++) {
+      const r = preRiskFilteredItems[i].riskLevel;
+      if (r === "critical") critical++;
+      else if (r === "warning") warning++;
+      else if (r === "overstock") overstock++;
+      else ok++;
+    }
+    return {
+      all: preRiskFilteredItems.length,
+      critical,
+      warning,
+      ok,
+      overstock,
+    };
+  }, [preRiskFilteredItems]);
+
+  // Step 3: Filter by selectedRisk
+  const filteredItems = useMemo(() => {
+    if (selectedRisk === "all") return preRiskFilteredItems;
+    return preRiskFilteredItems.filter((f) => f.riskLevel === selectedRisk);
+  }, [preRiskFilteredItems, selectedRisk]);
 
   // Sort items
   const sortedItems = useMemo(() => {
@@ -397,16 +478,16 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
       let res = 0;
       switch (sortField) {
         case "barcode":
-          res = a.item.barcode.localeCompare(b.item.barcode);
+          res = String(a.item.barcode || "").localeCompare(String(b.item.barcode || ""));
           break;
         case "name":
-          res = a.item.name.localeCompare(b.item.name);
+          res = String(a.item.name || "").localeCompare(String(b.item.name || ""), "th");
           break;
         case "line":
-          res = (a.item.line || "").localeCompare(b.item.line || "");
+          res = String(a.item.line || "").localeCompare(String(b.item.line || ""), "th");
           break;
         case "balance":
-          res = a.item.currentBalance - b.item.currentBalance;
+          res = (a.item.currentBalance ?? 0) - (b.item.currentBalance ?? 0);
           break;
         case "burnRate":
           res = a.monthlyBurnRate - b.monthlyBurnRate;
@@ -435,12 +516,69 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
     });
   }, [filteredItems, sortField, sortOrder]);
 
+  // Reset progressive batch count when filters change
+  useEffect(() => {
+    if (!showAllDirectly) {
+      setVisibleCount(INITIAL_BATCH);
+    }
+  }, [
+    deferredSearch,
+    selectedLines,
+    selectedCategories,
+    selectedSuppliers,
+    selectedRisk,
+    filterOrderStatus,
+    forecastHorizon,
+    bufferPercent,
+    sortField,
+    sortOrder,
+    showAllDirectly,
+  ]);
+
+  // Progressive infinite scroll via IntersectionObserver
+  useEffect(() => {
+    if (showAllDirectly) return;
+    const node = sentinelRef.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleCount((prev) =>
+            prev < sortedItems.length
+              ? Math.min(prev + BATCH_INCREMENT, sortedItems.length)
+              : prev
+          );
+        }
+      },
+      { rootMargin: "320px" }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [sortedItems.length, showAllDirectly]);
+
+  const displayedItems = useMemo(() => {
+    if (showAllDirectly || visibleCount >= sortedItems.length) {
+      return sortedItems;
+    }
+    return sortedItems.slice(0, visibleCount);
+  }, [sortedItems, visibleCount, showAllDirectly]);
+
   const handleHeaderSort = (field: ForecastSortField) => {
     if (sortField === field) {
       setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
     } else {
       setSortField(field);
-      if (["burnRate", "projectedDemand", "recommendedOrder", "estimatedCost", "risk"].includes(field)) {
+      if (
+        [
+          "burnRate",
+          "projectedDemand",
+          "recommendedOrder",
+          "estimatedCost",
+          "risk",
+        ].includes(field)
+      ) {
         setSortOrder("desc");
       } else {
         setSortOrder("asc");
@@ -450,44 +588,44 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
   const renderSortIcon = (field: ForecastSortField) => {
     if (sortField !== field) {
-      return <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-40 group-hover:opacity-100 transition" />;
+      return (
+        <ArrowUpDown className="w-3 h-3 text-slate-400 opacity-40 group-hover:opacity-100 transition" />
+      );
     }
     return sortOrder === "asc" ? (
-      <ArrowUp className="w-3.5 h-3.5 text-amber-400 font-bold" />
+      <ArrowUp className="w-3.5 h-3.5 text-amber-500 font-bold" />
     ) : (
-      <ArrowDown className="w-3.5 h-3.5 text-amber-400 font-bold" />
+      <ArrowDown className="w-3.5 h-3.5 text-amber-500 font-bold" />
     );
   };
 
-  // High-level KPI aggregations for filtered dataset
-  const totalRecommendedBudget = useMemo(() => {
-    return sortedItems.reduce((acc, f) => acc + f.estimatedCost, 0);
-  }, [sortedItems]);
+  // Single-pass aggregation for KPIs and Category Chart
+  const { totalRecommendedBudget, totalProjectedDemandQty, chartCategoryData } = useMemo(() => {
+    let budget = 0;
+    let demandQty = 0;
+    const catMap = new Map<
+      string,
+      { currentVal: number; demandVal: number; orderVal: number }
+    >();
 
-  const totalProjectedDemandQty = useMemo(() => {
-    return sortedItems.reduce((acc, f) => acc + f.projectedDemand, 0);
-  }, [sortedItems]);
+    for (let i = 0; i < sortedItems.length; i++) {
+      const f = sortedItems[i];
+      budget += f.estimatedCost;
+      demandQty += f.projectedDemand;
 
-  const criticalCount = useMemo(() => {
-    return sortedItems.filter((f) => f.riskLevel === "critical").length;
-  }, [sortedItems]);
-
-  const warningCount = useMemo(() => {
-    return sortedItems.filter((f) => f.riskLevel === "warning").length;
-  }, [sortedItems]);
-
-  // Chart data: Budget by category
-  const chartCategoryData = useMemo(() => {
-    const map = new Map<string, { currentVal: number; demandVal: number; orderVal: number }>();
-    for (const f of sortedItems) {
       const cat = f.item.category || "ทั่วไป";
-      const cur = map.get(cat) || { currentVal: 0, demandVal: 0, orderVal: 0 };
-      cur.currentVal += f.item.currentBalance * f.item.unitCost;
-      cur.demandVal += f.projectedDemand * f.item.unitCost;
+      let cur = catMap.get(cat);
+      if (!cur) {
+        cur = { currentVal: 0, demandVal: 0, orderVal: 0 };
+        catMap.set(cat, cur);
+      }
+      const unitCost = f.item.unitCost ?? 0;
+      cur.currentVal += (f.item.currentBalance ?? 0) * unitCost;
+      cur.demandVal += f.projectedDemand * unitCost;
       cur.orderVal += f.estimatedCost;
-      map.set(cat, cur);
     }
-    return Array.from(map.entries())
+
+    const chartData = Array.from(catMap.entries())
       .sort((a, b) => b[1].orderVal - a[1].orderVal)
       .slice(0, 6)
       .map(([cat, val]) => ({
@@ -496,6 +634,12 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
         "ความต้องการใช้ (฿)": Math.round(val.demandVal),
         "งบสั่งซื้อเพิ่ม (฿)": Math.round(val.orderVal),
       }));
+
+    return {
+      totalRecommendedBudget: budget,
+      totalProjectedDemandQty: demandQty,
+      chartCategoryData: chartData,
+    };
   }, [sortedItems]);
 
   const getExportData = () => {
@@ -520,9 +664,9 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
     ];
 
     const rows = sortedItems.map((f) => {
-      const oStatus = orderStatuses.find((s) => s.barcode === f.item.barcode);
-      const isOrdered = oStatus?.isOrdered || false;
-      const lotNumber = isOrdered ? (oStatus?.lotNumber || "-") : "-";
+      const oStatus = orderStatusMap.get(String(f.item.barcode || "").trim());
+      const isOrdered = Boolean(oStatus?.isOrdered);
+      const lotNumber = isOrdered ? oStatus?.lotNumber || "-" : "-";
 
       return [
         f.item.barcode || "",
@@ -530,13 +674,13 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
         f.item.category || "",
         f.item.line || "",
         f.item.unit || "",
-        f.item.currentBalance || 0,
-        f.item.minStock || 0,
+        f.item.currentBalance ?? 0,
+        f.item.minStock ?? 0,
         f.monthlyBurnRate || 0,
         f.projectedDemand || 0,
         f.monthsOfStockRemaining > 90 ? ">90" : f.monthsOfStockRemaining,
         f.recommendedOrder || 0,
-        f.item.unitCost || 0,
+        f.item.unitCost ?? 0,
         parseFloat(f.estimatedCost.toFixed(2)),
         f.riskLevel === "critical"
           ? "วิกฤต (หมดใน < 1 เดือน)"
@@ -561,22 +705,36 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
   const handleExportExcel = () => {
     const { headers, rows } = getExportData();
-    exportToExcel(`PASAYA_DEMAND_FORECAST_${forecastHorizon}M`, `Forecast_${forecastHorizon}M`, headers, rows);
+    exportToExcel(
+      `PASAYA_DEMAND_FORECAST_${forecastHorizon}M`,
+      `Forecast_${forecastHorizon}M`,
+      headers,
+      rows
+    );
   };
 
   const handleCreatePurchaseOrderFromFiltered = () => {
     if (!onCreatePurchaseOrder) return;
     const filterParts = [];
     if (selectedLines.length > 0) filterParts.push(`ไลน์: ${selectedLines.join(", ")}`);
-    if (selectedCategories.length > 0) filterParts.push(`หมวด: ${selectedCategories.join(", ")}`);
-    if (selectedSuppliers.length > 0) filterParts.push(`Supplier: ${selectedSuppliers.join(", ")}`);
+    if (selectedCategories.length > 0)
+      filterParts.push(`หมวด: ${selectedCategories.join(", ")}`);
+    if (selectedSuppliers.length > 0)
+      filterParts.push(`Supplier: ${selectedSuppliers.join(", ")}`);
     if (selectedRisk !== "all") filterParts.push(`ความเสี่ยง: ${selectedRisk}`);
     if (search) filterParts.push(`ค้นหา: "${search}"`);
-    if (filterOrderStatus !== "all") filterParts.push(`สถานะ: ${filterOrderStatus === "ordered" ? "สั่งแล้ว" : "ยังไม่ได้สั่ง"}`);
-    const filterContext = filterParts.length > 0 ? filterParts.join(" | ") : `พยากรณ์ ${forecastHorizon} เดือน`;
+    if (filterOrderStatus !== "all") {
+      filterParts.push(
+        `สถานะ: ${filterOrderStatus === "ordered" ? "สั่งแล้ว" : "ยังไม่ได้สั่ง"}`
+      );
+    }
+    const filterContext =
+      filterParts.length > 0
+        ? filterParts.join(" | ")
+        : `พยากรณ์ ${forecastHorizon} เดือน`;
 
     const poItems: PurchaseOrderItem[] = sortedItems.map((f) => {
-      const orderQty = Math.max(0, f.recommendedOrder || f.deficit || 0);
+      const orderQty = Math.max(0, f.recommendedOrder || 0);
       return {
         barcode: f.item.barcode,
         itemName: f.item.name,
@@ -585,9 +743,14 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
         unit: f.item.unit || "ชิ้น",
         monthlyBurnRate: parseFloat(f.monthlyBurnRate.toFixed(1)),
         monthsOfStock: f.monthsOfStockRemaining,
-        stockStatus: f.riskLevel === "critical" ? "out" : f.riskLevel === "warning" ? "low" : "ok",
-        currentBalance: f.item.currentBalance,
-        minStock: f.item.minStock,
+        stockStatus:
+          f.riskLevel === "critical"
+            ? "out"
+            : f.riskLevel === "warning"
+            ? "low"
+            : "ok",
+        currentBalance: f.item.currentBalance ?? 0,
+        minStock: f.item.minStock ?? 0,
         recommendedOrder: orderQty,
         orderQty: orderQty,
         unitPrice: f.item.unitCost || 0,
@@ -595,17 +758,49 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
       };
     });
 
-    onCreatePurchaseOrder(poItems, `ดึงจากหน้าพยากรณ์สั่งซื้อ (${filterContext})`, bufferPercent);
+    onCreatePurchaseOrder(
+      poItems,
+      `ดึงจากหน้าพยากรณ์สั่งซื้อ (${filterContext})`,
+      bufferPercent
+    );
   };
 
   return (
     <div className="space-y-5 pb-12">
+      {/* Inline Notice / Feedback Banner */}
+      {notice && (
+        <div
+          className={`p-3.5 rounded-2xl border flex items-center justify-between text-xs font-semibold shadow-sm ${
+            notice.type === "error"
+              ? "bg-rose-50 text-rose-800 border-rose-200"
+              : "bg-emerald-50 text-emerald-800 border-emerald-200"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {notice.type === "error" ? (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            )}
+            <span>{notice.text}</span>
+          </div>
+          <button
+            onClick={() => setNotice(null)}
+            className="text-slate-400 hover:text-slate-700 px-1.5 cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Top Welcome Banner */}
       <div className="bg-gradient-to-r from-amber-50/80 via-white to-amber-50/40 rounded-2xl p-6 text-slate-900 shadow-xs border border-amber-200/80 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
         <div>
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300 mb-2">
             <Sparkles className="w-3.5 h-3.5 text-amber-700" />
-            <span>ระบบพยากรณ์ความต้องการ & วางแผนสั่งซื้อล่วงหน้า (Demand Forecasting)</span>
+            <span>
+              ระบบพยากรณ์ความต้องการ & วางแผนสั่งซื้อล่วงหน้า (Demand Forecasting)
+            </span>
           </div>
           <h2 className="text-2xl font-extrabold tracking-tight text-slate-900">
             การวางแผนสั่งซื้อล่วงหน้า {forecastHorizon} เดือน
@@ -625,7 +820,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
               title="สร้างใบสั่งซื้อเฉพาะรายการที่ Filter ณ ตอนนี้"
             >
               <Package className="w-4 h-4" />
-              <span>สร้างใบสั่งซื้อจากที่กรอง ({sortedItems.length})</span>
+              <span>สร้างใบสั่งซื้อจากที่กรอง ({sortedItems.length.toLocaleString()})</span>
             </button>
           )}
 
@@ -649,24 +844,26 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
             ))}
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={handleExportExcel}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition cursor-pointer"
-              title="ส่งออกไฟล์ Excel (.xlsx) ตามเงื่อนไขที่กรองไว้"
-            >
-              <FileSpreadsheet className="w-4 h-4" />
-              <span>ส่งออก Excel</span>
-            </button>
-            <button
-              onClick={handleExportCSV}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer"
-              title="ส่งออกไฟล์ CSV (.csv) ตามเงื่อนไขที่กรองไว้"
-            >
-              <Download className="w-4 h-4" />
-              <span>ส่งออก CSV</span>
-            </button>
-          </div>
+          {canExport && (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleExportExcel}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition cursor-pointer"
+                title="ส่งออกไฟล์ Excel (.xlsx) ตามเงื่อนไขที่กรองไว้"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>ส่งออก Excel</span>
+              </button>
+              <button
+                onClick={handleExportCSV}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs transition cursor-pointer"
+                title="ส่งออกไฟล์ CSV (.csv) ตามเงื่อนไขที่กรองไว้"
+              >
+                <Download className="w-4 h-4" />
+                <span>ส่งออก CSV</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -677,9 +874,15 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
             <CircleDollarSign className="w-6 h-6" />
           </div>
           <div>
-            <div className="text-xs text-slate-500 font-medium">งบสั่งซื้อที่แนะนำ ({forecastHorizon} เดือน)</div>
+            <div className="text-xs text-slate-500 font-medium">
+              งบสั่งซื้อที่แนะนำ ({forecastHorizon} เดือน)
+            </div>
             <div className="text-xl font-extrabold text-slate-900 font-mono mt-0.5">
-              ฿{totalRecommendedBudget.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+              ฿
+              {totalRecommendedBudget.toLocaleString(undefined, {
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 0,
+              })}
             </div>
             <div className="text-[11px] text-amber-700 font-semibold mt-0.5">
               เพื่อรองรับความต้องการ + Min Stock
@@ -692,9 +895,11 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
             <AlertTriangle className="w-6 h-6" />
           </div>
           <div>
-            <div className="text-xs text-slate-500 font-medium">สินค้าวิกฤต (หมดใน &lt; 1 เดือน)</div>
+            <div className="text-xs text-slate-500 font-medium">
+              สินค้าวิกฤต (หมดใน &lt; 1 เดือน)
+            </div>
             <div className="text-xl font-extrabold text-rose-600 font-mono mt-0.5">
-              {criticalCount.toLocaleString()}{" "}
+              {riskCounts.critical.toLocaleString()}{" "}
               <span className="text-xs font-normal text-slate-500">SKU</span>
             </div>
             <div className="text-[11px] text-rose-600 font-medium mt-0.5">
@@ -708,9 +913,11 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
             <Clock className="w-6 h-6" />
           </div>
           <div>
-            <div className="text-xs text-slate-500 font-medium">สินค้าต้องสั่งใน {forecastHorizon} เดือน</div>
+            <div className="text-xs text-slate-500 font-medium">
+              สินค้าต้องสั่งใน {forecastHorizon} เดือน
+            </div>
             <div className="text-xl font-extrabold text-amber-600 font-mono mt-0.5">
-              {warningCount.toLocaleString()}{" "}
+              {riskCounts.warning.toLocaleString()}{" "}
               <span className="text-xs font-normal text-slate-500">SKU</span>
             </div>
             <div className="text-[11px] text-amber-700 font-medium mt-0.5">
@@ -724,7 +931,9 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
             <TrendingUp className="w-6 h-6" />
           </div>
           <div>
-            <div className="text-xs text-slate-500 font-medium">ปริมาณความต้องการรวม ({forecastHorizon}M)</div>
+            <div className="text-xs text-slate-500 font-medium">
+              ปริมาณความต้องการรวม ({forecastHorizon}M)
+            </div>
             <div className="text-xl font-extrabold text-slate-900 font-mono mt-0.5">
               {totalProjectedDemandQty.toLocaleString()}{" "}
               <span className="text-xs font-normal text-slate-500">หน่วย</span>
@@ -748,18 +957,54 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
           <span className="text-xs text-slate-400">หน่วย: บาท (THB)</span>
         </div>
 
-        <div className="h-64 w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartCategoryData} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
-              <XAxis dataKey="category" tick={{ fontSize: 11 }} interval={0} angle={-15} textAnchor="end" height={40} />
-              <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `฿${(v / 1000).toFixed(0)}k`} />
-              <Tooltip formatter={(v: any) => `฿${Number(v).toLocaleString()}`} />
-              <Legend wrapperStyle={{ fontSize: "11px" }} />
-              <Bar dataKey="สต็อกปัจจุบัน (฿)" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="ความต้องการใช้ (฿)" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="งบสั่งซื้อเพิ่ม (฿)" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+        <div className="h-64 w-full min-h-[240px]">
+          {isChartReady && chartCategoryData.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={220}>
+              <BarChart
+                data={chartCategoryData}
+                margin={{ top: 10, right: 20, left: 10, bottom: 20 }}
+              >
+                <XAxis
+                  dataKey="category"
+                  tick={{ fontSize: 11 }}
+                  interval={0}
+                  angle={-15}
+                  textAnchor="end"
+                  height={40}
+                />
+                <YAxis
+                  tick={{ fontSize: 10 }}
+                  tickFormatter={(v) => `฿${(Number(v) / 1000).toFixed(0)}k`}
+                />
+                <Tooltip formatter={(v: any) => `฿${Number(v).toLocaleString()}`} />
+                <Legend wrapperStyle={{ fontSize: "11px" }} />
+                <Bar
+                  dataKey="สต็อกปัจจุบัน (฿)"
+                  fill="#94a3b8"
+                  radius={[4, 4, 0, 0]}
+                  isAnimationActive={false}
+                />
+                <Bar
+                  dataKey="ความต้องการใช้ (฿)"
+                  fill="#3b82f6"
+                  radius={[4, 4, 0, 0]}
+                  isAnimationActive={false}
+                />
+                <Bar
+                  dataKey="งบสั่งซื้อเพิ่ม (฿)"
+                  fill="#f59e0b"
+                  radius={[4, 4, 0, 0]}
+                  isAnimationActive={false}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-full w-full flex items-center justify-center text-xs text-slate-400">
+              {chartCategoryData.length === 0
+                ? "ไม่มีข้อมูลสำหรับแสดงกราฟตามตัวกรองปัจจุบัน"
+                : "กำลังเตรียมกราฟ..."}
+            </div>
+          )}
         </div>
       </div>
 
@@ -897,7 +1142,9 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
             {filterOrderStatus !== "all" && (
               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-medium">
-                <span>สถานะ: {filterOrderStatus === "ordered" ? "สั่งซื้อแล้ว" : "ยังไม่ได้สั่งซื้อ"}</span>
+                <span>
+                  สถานะ: {filterOrderStatus === "ordered" ? "สั่งซื้อแล้ว" : "ยังไม่ได้สั่งซื้อ"}
+                </span>
                 <button
                   onClick={() => setFilterOrderStatus("all")}
                   className="text-amber-400 hover:text-amber-700 ml-0.5 cursor-pointer"
@@ -947,7 +1194,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
               }`}
             >
-              ทั้งหมด ({forecastItems.length})
+              ทั้งหมด ({riskCounts.all.toLocaleString()})
             </button>
             <button
               onClick={() => setSelectedRisk("critical")}
@@ -958,7 +1205,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
               }`}
             >
               <AlertTriangle className="w-3 h-3" />
-              วิกฤต (&lt; 1 เดือน) ({criticalCount})
+              วิกฤต (&lt; 1 เดือน) ({riskCounts.critical.toLocaleString()})
             </button>
             <button
               onClick={() => setSelectedRisk("warning")}
@@ -968,7 +1215,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                   : "bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100"
               }`}
             >
-              ต้องสั่งซื้อใน {forecastHorizon} เดือน ({warningCount})
+              ต้องสั่งซื้อใน {forecastHorizon} เดือน ({riskCounts.warning.toLocaleString()})
             </button>
             <button
               onClick={() => setSelectedRisk("ok")}
@@ -978,7 +1225,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                   : "bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100"
               }`}
             >
-              สต็อกเพียงพอ
+              สต็อกเพียงพอ ({riskCounts.ok.toLocaleString()})
             </button>
             <button
               onClick={() => setSelectedRisk("overstock")}
@@ -988,7 +1235,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                   : "bg-blue-50 text-blue-800 border border-blue-200 hover:bg-blue-100"
               }`}
             >
-              สต็อกล้น (&gt; 2x)
+              สต็อกล้น (&gt; 2x) ({riskCounts.overstock.toLocaleString()})
             </button>
           </div>
 
@@ -1027,7 +1274,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
               </select>
               <button
                 onClick={() => setSortOrder(sortOrder === "asc" ? "desc" : "asc")}
-                className="p-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition"
+                className="p-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
                 title="สลับลำดับ มาก-น้อย"
               >
                 <ArrowUpDown className="w-3.5 h-3.5" />
@@ -1037,7 +1284,6 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
         </div>
       </div>
 
-      
       {/* Order Lot Management Bar & Modal */}
       <OrderLotManager
         orderStatuses={orderStatuses}
@@ -1059,7 +1305,7 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs border-collapse">
-            <thead className="bg-slate-100 text-slate-700 font-semibold sticky top-0 select-none border-b border-slate-200">
+            <thead className="bg-slate-100 text-slate-700 font-semibold sticky top-0 z-10 select-none border-b border-slate-200">
               <tr>
                 <th className="p-3 w-12 text-center text-slate-500">#</th>
                 <th
@@ -1128,7 +1374,9 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                   title="คลิกเพื่อเรียงตาม ความต้องการใช้"
                 >
                   <div className="flex items-center justify-end gap-1">
-                    <span>ความต้องการ {forecastHorizon}ด. (+{bufferPercent}%)</span>
+                    <span>
+                      ความต้องการ {forecastHorizon}ด. (+{bufferPercent}%)
+                    </span>
                     {renderSortIcon("projectedDemand")}
                   </div>
                 </th>
@@ -1163,43 +1411,55 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                   </div>
                 </th>
                 <th className="p-3 text-center text-slate-700 w-40">หมายเหตุสั่งซื้อ</th>
-                <th className="p-3 text-center w-20 text-slate-700">จัดการ</th>
+                <th className="p-3 text-center w-24 text-slate-700">จัดการ</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {sortedItems.length === 0 ? (
+              {displayedItems.length === 0 ? (
                 <tr>
                   <td colSpan={13} className="text-center py-12 text-slate-400 text-sm">
-                    ไม่พบรายการที่ตรงกับเงื่อนไขการกรอง
+                    {items.length === 0
+                      ? "กำลังโหลดข้อมูลรายการสต็อก..."
+                      : "ไม่พบรายการที่ตรงกับเงื่อนไขการกรอง"}
                   </td>
                 </tr>
               ) : (
-                sortedItems.slice(0, 100).map((f, idx) => {
+                displayedItems.map((f, idx) => {
                   const it = f.item;
+                  const cleanCode = String(it.barcode || "").trim();
+                  const oStatus = orderStatusMap.get(cleanCode);
+                  const isOrdered = Boolean(oStatus?.isOrdered);
+                  const lotLabel = oStatus?.lotNumber ? String(oStatus.lotNumber).trim() : "-";
+                  const isCurrentLot =
+                    isOrdered && Boolean(activeLotNumber) && lotLabel === activeLotNumber;
+                  const balance = it.currentBalance ?? 0;
+
                   return (
                     <tr
-                      key={`${it.id || it.barcode}_${idx}`}
+                      key={`${it.id || cleanCode}_${idx}`}
                       onClick={() => onSelectItem(it)}
-                      className="hover:bg-amber-50/40 transition cursor-pointer"
+                      onDoubleClick={() => onSelectItem(it)}
+                      style={{ contentVisibility: "auto", containIntrinsicSize: "0 54px" }}
+                      className={`transition cursor-pointer ${
+                        isOrdered
+                          ? "bg-emerald-50/70 hover:bg-emerald-100"
+                          : "hover:bg-amber-50/40"
+                      }`}
                     >
-                      <td className="p-3 text-center text-slate-400 font-mono">
-                        {idx + 1}
-                      </td>
-                      <td className="p-3 font-mono font-bold text-slate-800">
-                        {it.barcode}
-                      </td>
+                      <td className="p-3 text-center text-slate-400 font-mono">{idx + 1}</td>
+                      <td className="p-3 font-mono font-bold text-slate-800">{cleanCode}</td>
                       <td className="p-3 font-medium text-slate-900">
                         <div>{it.name}</div>
                         <div className="text-[10px] text-slate-400 flex items-center gap-2">
-                          <span>ชนิด: {it.category}</span>
+                          <span>ชนิด: {it.category || "-"}</span>
                           {it.supplier && <span>| Supplier: {it.supplier}</span>}
                         </div>
                       </td>
 
                       <td className="p-3 text-slate-600">{it.line || "-"}</td>
                       <td className="p-3 text-right font-mono font-bold">
-                        <span className={it.currentBalance <= 0 ? "text-rose-600" : "text-slate-900"}>
-                          {it.currentBalance.toLocaleString()}
+                        <span className={balance <= 0 ? "text-rose-600" : "text-slate-900"}>
+                          {balance.toLocaleString()}
                         </span>{" "}
                         <span className="text-[10px] text-slate-400">{it.unit}</span>
                       </td>
@@ -1233,7 +1493,9 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
                       </td>
                       <td className="p-3 text-right font-mono font-bold text-emerald-700">
                         {f.estimatedCost > 0
-                          ? `฿${f.estimatedCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                          ? `฿${f.estimatedCost.toLocaleString(undefined, {
+                              maximumFractionDigits: 0,
+                            })}`
                           : "-"}
                       </td>
                       <td className="p-3 text-center">
@@ -1260,68 +1522,73 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
 
                       {/* Column 12: หมายเหตุสั่งซื้อ */}
                       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
-                        {(() => {
-                          const oStatus = orderStatuses.find((s) => s.barcode === it.barcode);
-                          const isOrdered = oStatus?.isOrdered || false;
-                          const isCurrentLot = isOrdered && activeLotNumber && oStatus?.lotNumber === activeLotNumber;
+                        <div className="flex flex-col items-center justify-center gap-1">
+                          <label
+                            className={`inline-flex items-center gap-1.5 ${
+                              !activeLotNumber || !canManageOrderStatus
+                                ? "cursor-not-allowed opacity-50"
+                                : "cursor-pointer"
+                            }`}
+                            title={
+                              !canManageOrderStatus
+                                ? "คุณไม่มีสิทธิ์จัดการสถานะสั่งซื้อ (กำหนดได้ในเมนู พนักงาน & สิทธิ์)"
+                                : !activeLotNumber
+                                ? "กรุณาสร้างหรือเลือก และกด 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ"
+                                : isOrdered
+                                ? `คลิกเพื่อยกเลิกสถานะสั่งซื้อ (Lot: ${lotLabel})`
+                                : `คลิกเพื่อบันทึกสั่งซื้อเข้า Lot: ${activeLotNumber}`
+                            }
+                          >
+                            <input
+                              type="checkbox"
+                              className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer disabled:cursor-not-allowed accent-indigo-600"
+                              disabled={!activeLotNumber || !canManageOrderStatus}
+                              checked={isOrdered}
+                              onChange={(e) =>
+                                handleToggleOrderStatus(cleanCode, e.target.checked)
+                              }
+                            />
+                            <span
+                              className={`text-[11px] font-medium select-none ${
+                                isOrdered ? "text-emerald-700 font-semibold" : "text-slate-400"
+                              }`}
+                            >
+                              {isOrdered ? "สั่งซื้อแล้ว" : "ยังไม่สั่ง"}
+                            </span>
+                          </label>
 
-                          return (
-                            <div className="flex flex-col items-center justify-center gap-1">
-                              <label
-                                className={`inline-flex items-center gap-1.5 ${
-                                  !activeLotNumber || !canManageOrderStatus ? "cursor-not-allowed opacity-50" : "cursor-pointer"
-                                }`}
-                                title={
-                                  !canManageOrderStatus
-                                    ? "คุณไม่มีสิทธิ์จัดการสถานะสั่งซื้อ (กำหนดได้ในเมนู พนักงาน & สิทธิ์)"
-                                    : !activeLotNumber
-                                    ? "กรุณาสร้างหรือเลือก และกด 'บันทึก Lot' ด้านบนก่อนทำการติ๊กสั่งซื้อ"
-                                    : isOrdered
-                                    ? `คลิกเพื่อยกเลิกสถานะสั่งซื้อ (Lot: ${oStatus?.lotNumber || "-"})`
-                                    : `คลิกเพื่อบันทึกสั่งซื้อเข้า Lot: ${activeLotNumber}`
-                                }
-                              >
-                                <input
-                                  type="checkbox"
-                                  className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer disabled:cursor-not-allowed accent-indigo-600"
-                                  disabled={!activeLotNumber || !canManageOrderStatus}
-                                  checked={isOrdered}
-                                  onChange={(e) => handleToggleOrderStatus(it.barcode, e.target.checked)}
-                                />
-                                <span
-                                  className={`text-[11px] font-medium select-none ${
-                                    isOrdered ? "text-emerald-700 font-semibold" : "text-slate-400"
-                                  }`}
-                                >
-                                  {isOrdered ? "สั่งซื้อแล้ว" : "ยังไม่สั่ง"}
-                                </span>
-                              </label>
-
-                              {isOrdered && (
-                                <span
-                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                                    isCurrentLot
-                                      ? "bg-emerald-100 text-emerald-800 border-emerald-300 shadow-xs"
-                                      : "bg-indigo-50 text-indigo-700 border-indigo-200"
-                                  }`}
-                                  title={`เลขที่รอบ Lot: ${oStatus?.lotNumber || "-"}`}
-                                >
-                                  Lot: {oStatus?.lotNumber || "-"}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })()}
+                          {isOrdered && (
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                isCurrentLot
+                                  ? "bg-emerald-100 text-emerald-800 border-emerald-300 shadow-xs"
+                                  : "bg-indigo-50 text-indigo-700 border-indigo-200"
+                              }`}
+                              title={`เลขที่รอบ Lot: ${lotLabel}`}
+                            >
+                              Lot: {lotLabel}
+                            </span>
+                          )}
+                        </div>
                       </td>
-                      
+
                       {/* Column 13: จัดการ */}
                       <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          onClick={() => onQuickMove(it, "in")}
-                          className="px-2 py-1 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white transition shadow-sm"
-                        >
-                          + รับเข้า
-                        </button>
+                        {canReceive ? (
+                          <button
+                            onClick={() => onQuickMove(it, "in")}
+                            className="px-2 py-1 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white transition shadow-sm cursor-pointer"
+                          >
+                            + รับเข้า
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => onSelectItem(it)}
+                            className="px-2 py-1 rounded-lg text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
+                          >
+                            ดูข้อมูล
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1331,13 +1598,52 @@ export const ForecastPlanningView: React.FC<ForecastPlanningViewProps> = ({
           </table>
         </div>
 
-        {sortedItems.length > 100 && (
-          <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 text-xs text-center text-slate-500">
-            แสดง 100 รายการแรกจากทั้งหมด {sortedItems.length.toLocaleString()} รายการ (ส่งออก Excel หรือ CSV เพื่อดูข้อมูลครบทั้งหมด)
+        {/* Progressive Scroll Sentinel */}
+        {!showAllDirectly && displayedItems.length < sortedItems.length && (
+          <div
+            ref={sentinelRef}
+            className="px-5 py-3 bg-amber-50/40 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600"
+          >
+            <span>
+              กำลังแสดง {displayedItems.length.toLocaleString()} จาก{" "}
+              {sortedItems.length.toLocaleString()} รายการ (เลื่อนลงเพื่อโหลดเพิ่มอัตโนมัติ)
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setVisibleCount((prev) =>
+                    Math.min(prev + BATCH_INCREMENT * 2, sortedItems.length)
+                  )
+                }
+                className="px-3 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-semibold cursor-pointer"
+              >
+                โหลดเพิ่ม +120 รายการ
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAllDirectly(true)}
+                className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold cursor-pointer"
+              >
+                แสดงทั้งหมดทันที ({sortedItems.length.toLocaleString()})
+              </button>
+            </div>
           </div>
         )}
-      </div>
 
+        <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-600">
+          <span>
+            แสดง {displayedItems.length.toLocaleString()} จากทั้งหมด{" "}
+            {sortedItems.length.toLocaleString()} รายการพยากรณ์
+          </span>
+          <span>
+            งบสั่งซื้อแนะนำรวม ({forecastHorizon} เดือน):{" "}
+            <strong className="text-amber-700">
+              ฿{totalRecommendedBudget.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            </strong>
+          </span>
+        </div>
+      </div>
     </div>
   );
 };
