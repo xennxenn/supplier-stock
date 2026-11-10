@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useDeferredValue } from "react";
 import {
   onSnapshot,
   doc,
@@ -40,6 +40,8 @@ import {
   ShoppingBag,
   RefreshCw,
   Ban,
+  Calendar,
+  PackagePlus,
 } from "lucide-react";
 import type {
   PurchaseOrder,
@@ -52,8 +54,28 @@ import type {
 } from "../types";
 import { hasPermission } from "../utils/permissionUtils";
 import { exportToCSV } from "../utils/exportUtils";
+import {
+  extractAllMonths,
+  selectTargetMonths,
+  computeItemUsageMap,
+} from "../utils/usageUtils";
 import { PrintablePurchaseOrder } from "./PrintablePurchaseOrder";
 import { TwoStepConfirmModal } from "./TwoStepConfirmModal";
+
+type BurnRatePeriod = "3m" | "6m" | "1y" | "2y" | "all";
+
+const BURN_RATE_PERIOD_OPTIONS: {
+  id: BurnRatePeriod;
+  label: string;
+  shortLabel: string;
+  months: number | "all";
+}[] = [
+  { id: "6m", label: "ย้อนหลัง 6 เดือน", shortLabel: "6 เดือน", months: 6 },
+  { id: "1y", label: "ย้อนหลัง 1 ปี (12 ด.)", shortLabel: "1 ปี", months: 12 },
+  { id: "2y", label: "ย้อนหลัง 2 ปี (24 ด.)", shortLabel: "2 ปี", months: 24 },
+  { id: "3m", label: "ย้อนหลัง 3 เดือน", shortLabel: "3 เดือน", months: 3 },
+  { id: "all", label: "ทั้งหมด", shortLabel: "ทั้งหมด", months: "all" },
+];
 
 interface PurchaseOrdersViewProps {
   currentUser: Employee;
@@ -97,8 +119,55 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
   // Buffer percentage selector for active editor
   const [editorBufferPercent, setEditorBufferPercent] = useState<number>(20);
 
+  // Burn rate calculation period selector (6m, 1y, 2y, etc.)
+  const [burnRatePeriod, setBurnRatePeriod] = useState<BurnRatePeriod>("6m");
+
+  // Search & Add Item inside PO Editor
+  const [poItemSearch, setPoItemSearch] = useState("");
+  const deferredPoItemSearch = useDeferredValue(poItemSearch);
+  const [showStockSearchDropdown, setShowStockSearchDropdown] = useState(false);
+  const [hideAlreadyAdded, setHideAlreadyAdded] = useState(false);
+  const [customQtyByBarcode, setCustomQtyByBarcode] = useState<Record<string, number>>({});
+
+  // Custom / Unlisted Item Form inside PO Editor
+  const [showCustomItemForm, setShowCustomItemForm] = useState(false);
+  const [customBarcode, setCustomBarcode] = useState("");
+  const [customItemName, setCustomItemName] = useState("");
+  const [customLine, setCustomLine] = useState("MTO");
+  const [customSupplier, setCustomSupplier] = useState("");
+  const [customUnit, setCustomUnit] = useState("ชิ้น");
+  const [customOrderQty, setCustomOrderQty] = useState<number>(1);
+  const [customUnitPrice, setCustomUnitPrice] = useState<number>(0);
+
+  // Non-blocking notification banner
+  const [notice, setNotice] = useState<{
+    type: "success" | "error" | "info";
+    message: string;
+  } | null>(null);
+
+  const showNotice = (message: string, type: "success" | "error" | "info" = "info") => {
+    setNotice({ message, type });
+    window.setTimeout(() => {
+      setNotice((prev) => (prev?.message === message ? null : prev));
+    }, 4000);
+  };
+
   // Status changing dialog/state
   const [isProcessingStatus, setIsProcessingStatus] = useState(false);
+
+  // Precompute all available months and period usage map using WeakMap-cached utils
+  const allMonths = useMemo(() => extractAllMonths(transactions), [transactions]);
+
+  const activeTargetMonths = useMemo(() => {
+    const opt = BURN_RATE_PERIOD_OPTIONS.find((o) => o.id === burnRatePeriod);
+    const count = !opt || opt.months === "all" ? 0 : opt.months;
+    return selectTargetMonths(allMonths, count);
+  }, [allMonths, burnRatePeriod]);
+
+  const periodUsageMap = useMemo(
+    () => computeItemUsageMap(transactions, activeTargetMonths),
+    [transactions, activeTargetMonths]
+  );
 
   // Subscribe to real-time purchase orders from Firestore
   useEffect(() => {
@@ -119,45 +188,6 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
     return () => unsub();
   }, []);
 
-  // Handle incoming prefilled order from Alerts or Forecast
-  useEffect(() => {
-    if (initialNewOrder && initialNewOrder.items && initialNewOrder.items.length > 0) {
-      const now = new Date();
-      const dateStr = now.toISOString().slice(0, 10).replace(/-/g, "");
-      const count = orders.length + 1;
-      const poNum = `PO-${dateStr}-${String(count).padStart(3, "0")}`;
-
-      const totalQty = initialNewOrder.items.reduce((s, it) => s + it.orderQty, 0);
-      const totalCost = initialNewOrder.items.reduce((s, it) => s + it.totalCost, 0);
-
-      const newOrder: PurchaseOrder = {
-        id: `po_${Date.now()}`,
-        poNumber: poNum,
-        title: `ใบสั่งซื้อวัตถุดิบ (${initialNewOrder.items.length} รายการ)`,
-        status: "new",
-        createdAt: now.toISOString(),
-        updatedAt: now.toISOString(),
-        createdBy: currentUser.name,
-        createdById: currentUser.id,
-        safetyBufferPercent: initialNewOrder.bufferPercent || 20,
-        filterSummary: initialNewOrder.filterSummary || "สร้างจากรายการที่เลือก",
-        items: initialNewOrder.items,
-        totalItems: initialNewOrder.items.length,
-        totalOrderQty: totalQty,
-        totalCost: totalCost,
-      };
-
-      setEditorBufferPercent(initialNewOrder.bufferPercent || 20);
-      setEditingOrder(newOrder);
-      setIsCreatingNew(true);
-      setActiveTab("orders");
-
-      if (onClearInitialNewOrder) {
-        onClearInitialNewOrder();
-      }
-    }
-  }, [initialNewOrder, orders.length, currentUser, onClearInitialNewOrder]);
-
   // Recalculate item recommendation based on buffer %
   const recalculateRecommendedOrder = (
     item: PurchaseOrderItem,
@@ -168,6 +198,69 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
     const deficit = Math.max(0, targetStock - item.currentBalance);
     return Math.ceil(deficit);
   };
+
+  // Handle incoming prefilled order from Alerts or Forecast
+  useEffect(() => {
+    if (initialNewOrder && initialNewOrder.items && initialNewOrder.items.length > 0) {
+      const now = new Date();
+      const dateStr = now.toISOString().slice(0, 10).replace(/-/g, "");
+      const count = orders.length + 1;
+      const poNum = `PO-${dateStr}-${String(count).padStart(3, "0")}`;
+
+      const buf = initialNewOrder.bufferPercent || 20;
+      const enrichedItems = initialNewOrder.items.map((it) => {
+        const key = it.barcode.trim().toLowerCase();
+        const stats = periodUsageMap.get(key);
+        const burnRate =
+          stats !== undefined
+            ? stats.avgMonthlyOut
+            : it.monthlyBurnRate;
+        const mos =
+          burnRate > 0
+            ? parseFloat((it.currentBalance / burnRate).toFixed(1))
+            : 999;
+        const tempItem: PurchaseOrderItem = {
+          ...it,
+          monthlyBurnRate: burnRate,
+          monthsOfStock: mos,
+        };
+        const rec = recalculateRecommendedOrder(tempItem, buf);
+        return {
+          ...tempItem,
+          recommendedOrder: rec,
+        };
+      });
+
+      const totalQty = enrichedItems.reduce((s, it) => s + it.orderQty, 0);
+      const totalCost = enrichedItems.reduce((s, it) => s + it.totalCost, 0);
+
+      const newOrder: PurchaseOrder = {
+        id: `po_${Date.now()}`,
+        poNumber: poNum,
+        title: `ใบสั่งซื้อวัตถุดิบ (${enrichedItems.length} รายการ)`,
+        status: "new",
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        createdBy: currentUser.name,
+        createdById: currentUser.id,
+        safetyBufferPercent: buf,
+        filterSummary: initialNewOrder.filterSummary || "สร้างจากรายการที่เลือก",
+        items: enrichedItems,
+        totalItems: enrichedItems.length,
+        totalOrderQty: totalQty,
+        totalCost: totalCost,
+      };
+
+      setEditorBufferPercent(buf);
+      setEditingOrder(newOrder);
+      setIsCreatingNew(true);
+      setActiveTab("orders");
+
+      if (onClearInitialNewOrder) {
+        onClearInitialNewOrder();
+      }
+    }
+  }, [initialNewOrder, orders.length, currentUser, onClearInitialNewOrder, periodUsageMap]);
 
   // Start new empty purchase order
   const handleStartNewOrder = () => {
@@ -193,8 +286,52 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
     };
 
     setEditorBufferPercent(20);
+    setPoItemSearch("");
+    setShowStockSearchDropdown(true);
     setEditingOrder(newOrder);
     setIsCreatingNew(true);
+  };
+
+  // Apply burn rate period (6m, 1y, 2y, 3m, all) to all items in current editor
+  const handleApplyBurnRatePeriod = (nextPeriod: BurnRatePeriod) => {
+    setBurnRatePeriod(nextPeriod);
+    if (!editingOrder) return;
+
+    const opt = BURN_RATE_PERIOD_OPTIONS.find((o) => o.id === nextPeriod);
+    const count = !opt || opt.months === "all" ? 0 : opt.months;
+    const nextMonths = selectTargetMonths(allMonths, count);
+    const nextUsageMap = computeItemUsageMap(transactions, nextMonths);
+
+    const updatedItems = editingOrder.items.map((it) => {
+      const key = it.barcode.trim().toLowerCase();
+      const stats = nextUsageMap.get(key);
+      const newBurnRate =
+        stats !== undefined
+          ? stats.avgMonthlyOut
+          : allMonths.length === 0 && it.minStock > 0
+          ? parseFloat(Math.max(0.5, it.minStock / 3).toFixed(1))
+          : 0;
+      const newMonthsOfStock =
+        newBurnRate > 0
+          ? parseFloat((it.currentBalance / newBurnRate).toFixed(1))
+          : 999;
+
+      const updatedItem: PurchaseOrderItem = {
+        ...it,
+        monthlyBurnRate: newBurnRate,
+        monthsOfStock: newMonthsOfStock,
+      };
+      const newRec = recalculateRecommendedOrder(updatedItem, editorBufferPercent);
+      return {
+        ...updatedItem,
+        recommendedOrder: newRec,
+      };
+    });
+
+    setEditingOrder({
+      ...editingOrder,
+      items: updatedItems,
+    });
   };
 
   // Apply safety buffer to all items in current editor
@@ -215,6 +352,197 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
       safetyBufferPercent: newBuffer,
       items: updatedItems,
     });
+  };
+
+  // Map of barcodes currently in editingOrder.items
+  const existingBarcodesInPO = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!editingOrder) return map;
+    editingOrder.items.forEach((it, idx) => {
+      map.set(it.barcode.trim().toLowerCase(), idx);
+    });
+    return map;
+  }, [editingOrder]);
+
+  // Filtered stock items for searching by barcode or item name inside PO Editor
+  const searchableStockItems = useMemo(() => {
+    const q = deferredPoItemSearch.trim().toLowerCase();
+    const results: StockItem[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (hideAlreadyAdded && existingBarcodesInPO.has(it.barcode.trim().toLowerCase())) {
+        continue;
+      }
+      if (!q) {
+        results.push(it);
+      } else {
+        const matchBarcode = it.barcode.toLowerCase().includes(q);
+        const matchName = it.name.toLowerCase().includes(q);
+        const matchSupplier = (it.supplier || "").toLowerCase().includes(q);
+        const matchLine = (it.line || "").toLowerCase().includes(q);
+        if (matchBarcode || matchName || matchSupplier || matchLine) {
+          results.push(it);
+        }
+      }
+      if (results.length >= 40) break;
+    }
+    return results;
+  }, [items, deferredPoItemSearch, hideAlreadyAdded, existingBarcodesInPO]);
+
+  // Add a stock item from StockItem master list into editingOrder.items
+  const handleAddStockItemToPO = (stockItem: StockItem, overrideQty?: number) => {
+    if (!editingOrder) return;
+    const key = stockItem.barcode.trim().toLowerCase();
+    const existingIdx = existingBarcodesInPO.get(key);
+
+    const stats = periodUsageMap.get(key);
+    const burnRate =
+      stats !== undefined
+        ? stats.avgMonthlyOut
+        : allMonths.length === 0 && stockItem.minStock > 0
+        ? parseFloat(Math.max(0.5, stockItem.minStock / 3).toFixed(1))
+        : 0;
+    const mos =
+      burnRate > 0
+        ? parseFloat((stockItem.currentBalance / burnRate).toFixed(1))
+        : 999;
+
+    const stockStatus: "out" | "low" | "normal" =
+      stockItem.currentBalance <= 0
+        ? "out"
+        : stockItem.currentBalance < stockItem.minStock
+        ? "low"
+        : "normal";
+
+    const baseItem: PurchaseOrderItem = {
+      barcode: stockItem.barcode,
+      itemName: stockItem.name,
+      line: stockItem.line || "-",
+      supplier: stockItem.supplier || "-",
+      unit: stockItem.unit || "ชิ้น",
+      monthlyBurnRate: burnRate,
+      monthsOfStock: mos,
+      stockStatus,
+      currentBalance: stockItem.currentBalance,
+      minStock: stockItem.minStock,
+      recommendedOrder: 0,
+      orderQty: 0,
+      unitPrice: stockItem.unitCost || 0,
+      totalCost: 0,
+    };
+
+    const recommended = recalculateRecommendedOrder(baseItem, editorBufferPercent);
+    const chosenQty =
+      overrideQty !== undefined && overrideQty > 0
+        ? overrideQty
+        : customQtyByBarcode[stockItem.barcode] !== undefined &&
+          customQtyByBarcode[stockItem.barcode] > 0
+        ? customQtyByBarcode[stockItem.barcode]
+        : recommended > 0
+        ? recommended
+        : 1;
+
+    if (existingIdx !== undefined) {
+      // Item already in list -> increment its orderQty
+      const updated = [...editingOrder.items];
+      const existing = { ...updated[existingIdx] };
+      existing.orderQty = existing.orderQty + chosenQty;
+      existing.totalCost = existing.orderQty * existing.unitPrice;
+      updated[existingIdx] = existing;
+
+      const totalQty = updated.reduce((s, it) => s + it.orderQty, 0);
+      const totalCost = updated.reduce((s, it) => s + it.totalCost, 0);
+
+      setEditingOrder({
+        ...editingOrder,
+        items: updated,
+        totalItems: updated.length,
+        totalOrderQty: totalQty,
+        totalCost,
+      });
+      showNotice(
+        `บวกเพิ่มจำนวน "${stockItem.name}" (+${chosenQty.toLocaleString()} ${stockItem.unit}) ในใบสั่งซื้อแล้ว`,
+        "success"
+      );
+      return;
+    }
+
+    const newPOItem: PurchaseOrderItem = {
+      ...baseItem,
+      recommendedOrder: recommended,
+      orderQty: chosenQty,
+      totalCost: chosenQty * (stockItem.unitCost || 0),
+    };
+
+    const updated = [newPOItem, ...editingOrder.items];
+    const totalQty = updated.reduce((s, it) => s + it.orderQty, 0);
+    const totalCost = updated.reduce((s, it) => s + it.totalCost, 0);
+
+    setEditingOrder({
+      ...editingOrder,
+      items: updated,
+      totalItems: updated.length,
+      totalOrderQty: totalQty,
+      totalCost,
+    });
+    showNotice(
+      `เพิ่ม "${stockItem.name}" (${stockItem.barcode}) เข้าใบสั่งซื้อเรียบร้อยแล้ว`,
+      "success"
+    );
+  };
+
+  // Add a custom / unlisted item into editingOrder.items
+  const handleAddCustomItemToPO = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!editingOrder) return;
+
+    const trimmedName = customItemName.trim();
+    if (!trimmedName) {
+      showNotice("กรุณาระบุชื่อรายการสินค้าที่ต้องการเพิ่ม", "error");
+      return;
+    }
+
+    const finalBarcode =
+      customBarcode.trim() || `CUSTOM-${Date.now().toString().slice(-5)}`;
+    const qty = Math.max(1, Number(customOrderQty) || 1);
+    const price = Math.max(0, Number(customUnitPrice) || 0);
+
+    const newCustomItem: PurchaseOrderItem = {
+      barcode: finalBarcode,
+      itemName: trimmedName,
+      line: customLine.trim() || "ทั่วไป",
+      supplier: customSupplier.trim() || "-",
+      unit: customUnit.trim() || "ชิ้น",
+      monthlyBurnRate: 0,
+      monthsOfStock: 999,
+      stockStatus: "normal",
+      currentBalance: 0,
+      minStock: 0,
+      recommendedOrder: qty,
+      orderQty: qty,
+      unitPrice: price,
+      totalCost: qty * price,
+    };
+
+    const updated = [newCustomItem, ...editingOrder.items];
+    const totalQty = updated.reduce((s, it) => s + it.orderQty, 0);
+    const totalCost = updated.reduce((s, it) => s + it.totalCost, 0);
+
+    setEditingOrder({
+      ...editingOrder,
+      items: updated,
+      totalItems: updated.length,
+      totalOrderQty: totalQty,
+      totalCost,
+    });
+
+    setCustomBarcode("");
+    setCustomItemName("");
+    setCustomSupplier("");
+    setCustomOrderQty(1);
+    setCustomUnitPrice(0);
+    setShowCustomItemForm(false);
+    showNotice(`เพิ่มรายการนอกลิสต์ "${trimmedName}" เข้าใบสั่งซื้อแล้ว`, "success");
   };
 
   // Set orderQty = recommendedOrder for all items in editor
@@ -295,7 +623,7 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
   const handleSaveOrder = async (targetStatus?: PurchaseOrderStatus) => {
     if (!editingOrder) return;
     if (editingOrder.items.length === 0) {
-      alert("กรุณาระบุรายการสินค้าในใบสั่งซื้ออย่างน้อย 1 รายการ");
+      showNotice("กรุณาระบุรายการสินค้าในใบสั่งซื้ออย่างน้อย 1 รายการ", "error");
       return;
     }
 
@@ -320,11 +648,11 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
       await setDoc(doc(db, "purchaseOrders", toSave.id), toSave);
       setEditingOrder(null);
       setIsCreatingNew(false);
-      alert(`บันทึกใบสั่งซื้อ ${toSave.poNumber} เรียบร้อยแล้ว`);
+      showNotice(`บันทึกใบสั่งซื้อ ${toSave.poNumber} เรียบร้อยแล้ว`, "success");
     } catch (err) {
       console.error("Save PO error:", err);
       handleFirestoreError(err, OperationType.WRITE, `purchaseOrders/${toSave.id}`);
-      alert("เกิดข้อผิดพลาดในการบันทึกใบสั่งซื้อ กรุณาลองใหม่อีกครั้ง");
+      showNotice("เกิดข้อผิดพลาดในการบันทึกใบสั่งซื้อ กรุณาลองใหม่อีกครั้ง", "error");
     }
   };
 
@@ -344,7 +672,10 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
     order: PurchaseOrder
   ) => {
     if (!canManagePO) {
-      alert("คุณไม่มีสิทธิ์ในการดำเนินการนี้ (ต้องมีสิทธิ์ Admin, Manager หรือสิทธิ์จัดการใบสั่งซื้อ)");
+      showNotice(
+        "คุณไม่มีสิทธิ์ในการดำเนินการนี้ (ต้องมีสิทธิ์ Admin, Manager หรือสิทธิ์จัดการใบสั่งซื้อ)",
+        "error"
+      );
       return;
     }
     setConfirmModalState({
@@ -512,7 +843,7 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
       setConfirmModalState({ isOpen: false, actionType: "approve", order: null });
     } catch (err) {
       console.error("Execute 2-step action error:", err);
-      alert("เกิดข้อผิดพลาดในการดำเนินการ");
+      showNotice("เกิดข้อผิดพลาดในการดำเนินการ", "error");
     } finally {
       setIsProcessingStatus(false);
     }
@@ -552,13 +883,16 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
 
   // Export full table to CSV
   const handleExportOrderCSV = (order: PurchaseOrder) => {
+    const activePeriodLabel =
+      BURN_RATE_PERIOD_OPTIONS.find((o) => o.id === burnRatePeriod)?.shortLabel ||
+      "6 เดือน";
     const headers = [
       "บาร์โค้ด",
       "ชื่อรายการสินค้า",
       "ไลน์",
       "Supplier",
       "หน่วย",
-      "ใช้งานเฉลี่ยต่อเดือน",
+      `ใช้งานเฉลี่ยต่อเดือน (${activePeriodLabel})`,
       "พอใช้กี่เดือน",
       "สถานะสต็อก",
       "คงเหลือ",
@@ -589,8 +923,38 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
     exportToCSV(`ใบสั่งซื้อ_${order.poNumber}`, headers, rows);
   };
 
+  const activePeriodObj =
+    BURN_RATE_PERIOD_OPTIONS.find((o) => o.id === burnRatePeriod) ||
+    BURN_RATE_PERIOD_OPTIONS[0];
+
   return (
     <div className="space-y-6">
+      {/* Non-blocking Notice Toast */}
+      {notice && (
+        <div
+          className={`fixed bottom-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-2xl shadow-lg border text-xs font-bold transition-all ${
+            notice.type === "success"
+              ? "bg-emerald-600 text-white border-emerald-500"
+              : notice.type === "error"
+              ? "bg-rose-600 text-white border-rose-500"
+              : "bg-slate-900 text-white border-slate-700"
+          }`}
+        >
+          {notice.type === "success" ? (
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 shrink-0" />
+          )}
+          <span>{notice.message}</span>
+          <button
+            onClick={() => setNotice(null)}
+            className="ml-2 p-0.5 rounded-lg hover:bg-white/20 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Printable Purchase Order Modal */}
       {viewingPrintOrder && (
         <PrintablePurchaseOrder
@@ -758,8 +1122,8 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
             </div>
           </div>
 
-          {/* Form Top Controls: Title, Buffer %, Filter Note */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-6">
+          {/* Form Top Controls: Title, Burn Rate Period (6m/1y/2y), Buffer %, Filter Note */}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 my-6">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
                 ชื่อเอกสาร / รายละเอียดใบสั่งซื้อ:
@@ -775,6 +1139,35 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
 
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                <span className="flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>คำนวณ เฉลี่ย/เดือน:</span>
+                </span>
+                <span className="font-mono text-indigo-700">
+                  {activePeriodObj.shortLabel} ({activeTargetMonths.length} ด.)
+                </span>
+              </label>
+              <div className="flex items-center gap-1">
+                {BURN_RATE_PERIOD_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => handleApplyBurnRatePeriod(opt.id)}
+                    className={`flex-1 py-1.5 px-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap ${
+                      burnRatePeriod === opt.id
+                        ? "bg-indigo-600 text-white shadow-xs"
+                        : "bg-white/80 hover:bg-white text-slate-700 border border-slate-200"
+                    }`}
+                    title={`คำนวณยอดใช้งานเฉลี่ยต่อเดือน (${opt.label})`}
+                  >
+                    {opt.shortLabel}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
                 <span>เลือกเผื่อสต็อก (% Buffer):</span>
                 <span className="font-mono text-sky-700">+{editorBufferPercent}%</span>
               </label>
@@ -782,8 +1175,9 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
                 {[0, 10, 20, 30, 50].map((b) => (
                   <button
                     key={b}
+                    type="button"
                     onClick={() => handleApplyBufferPercent(b)}
-                    className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                       editorBufferPercent === b
                         ? "bg-sky-600 text-white shadow-xs"
                         : "bg-white/80 hover:bg-white text-slate-700 border border-slate-200"
@@ -809,11 +1203,402 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
             </div>
           </div>
 
+          {/* Add Items Section: Search by Barcode / Item Name OR Add Custom Unlisted Item */}
+          {editingOrder.status !== "cancelled" && editingOrder.status !== "received" && (
+            <div className="mb-5 p-4 rounded-2xl bg-white/85 border border-sky-200/80 shadow-2xs space-y-3">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 rounded-xl bg-sky-100 text-sky-700">
+                    <PackagePlus className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800">
+                      เพิ่มรายการสินค้าเข้าใบสั่งซื้อ (ค้นหาจากบาร์โค้ด / ชื่อรายการสินค้า หรือเพิ่มรายการนอกลิสต์)
+                    </h3>
+                    <p className="text-[11px] text-slate-500">
+                      พิมพ์รหัสบาร์โค้ดหรือชื่อสินค้าเพื่อค้นหาจากคลัง ({items.length.toLocaleString()} รายการ) หรือกดเพิ่มสินค้านอกระบบ
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowStockSearchDropdown((v) => !v)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                      showStockSearchDropdown
+                        ? "bg-sky-600 text-white border-sky-600 shadow-2xs"
+                        : "bg-white hover:bg-sky-50 text-sky-700 border-sky-200"
+                    }`}
+                  >
+                    <Search className="w-3.5 h-3.5" />
+                    <span>
+                      {showStockSearchDropdown
+                        ? "ซ่อนรายการค้นหาสินค้า"
+                        : "เลือกรายการสินค้าจากคลัง"}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCustomItemForm((v) => !v);
+                      if (!showCustomItemForm && poItemSearch.trim()) {
+                        const q = poItemSearch.trim();
+                        if (/^[A-Za-z0-9\-_]+$/.test(q) && !q.includes(" ")) {
+                          setCustomBarcode(q);
+                        } else {
+                          setCustomItemName(q);
+                        }
+                      }
+                    }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                      showCustomItemForm
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow-2xs"
+                        : "bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200"
+                    }`}
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>เพิ่มสินค้านอกลิสต์ (กรอกเอง)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Search Input Bar */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={poItemSearch}
+                    onFocus={() => setShowStockSearchDropdown(true)}
+                    onChange={(e) => {
+                      setPoItemSearch(e.target.value);
+                      if (!showStockSearchDropdown) setShowStockSearchDropdown(true);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && poItemSearch.trim()) {
+                        e.preventDefault();
+                        const q = poItemSearch.trim().toLowerCase();
+                        const exactMatch = items.find(
+                          (it) => it.barcode.trim().toLowerCase() === q
+                        );
+                        if (exactMatch) {
+                          handleAddStockItemToPO(exactMatch);
+                          setPoItemSearch("");
+                        } else if (searchableStockItems.length === 1) {
+                          handleAddStockItemToPO(searchableStockItems[0]);
+                          setPoItemSearch("");
+                        }
+                      }
+                    }}
+                    placeholder="ค้นหาด้วย บาร์โค้ด, ชื่อรายการสินค้า, ไลน์ หรือ Supplier (กด Enter เพื่อเพิ่มทันทีเมื่อตรงกับบาร์โค้ด)..."
+                    className="w-full pl-9 pr-8 py-2 rounded-xl border border-slate-300 bg-white text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                  {poItemSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setPoItemSearch("")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                <label className="flex items-center gap-1.5 text-xs font-medium text-slate-600 cursor-pointer select-none px-2 py-1.5 rounded-xl bg-slate-50 border border-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={hideAlreadyAdded}
+                    onChange={(e) => setHideAlreadyAdded(e.target.checked)}
+                    className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                  />
+                  <span>ซ่อนรายการที่อยู่ในใบสั่งซื้อแล้ว</span>
+                </label>
+              </div>
+
+              {/* Search Results Table / Picker */}
+              {(showStockSearchDropdown || poItemSearch.trim() !== "") && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden">
+                  <div className="flex items-center justify-between px-3 py-2 bg-slate-100/90 border-b border-slate-200 text-[11px] font-semibold text-slate-600">
+                    <span>
+                      ผลการค้นหาสินค้าจากคลัง ({searchableStockItems.length} รายการ
+                      {searchableStockItems.length >= 40 ? " แรก" : ""}) · คำนวณเฉลี่ย/เดือนแบบ{" "}
+                      <strong className="text-indigo-700">{activePeriodObj.shortLabel}</strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowStockSearchDropdown(false)}
+                      className="text-slate-500 hover:text-slate-800 underline cursor-pointer"
+                    >
+                      ย่อหน้าต่างค้นหา
+                    </button>
+                  </div>
+
+                  {searchableStockItems.length > 0 ? (
+                    <div className="max-h-64 overflow-y-auto divide-y divide-slate-200/70 bg-white">
+                      {searchableStockItems.map((st) => {
+                        const key = st.barcode.trim().toLowerCase();
+                        const inPOIdx = existingBarcodesInPO.get(key);
+                        const alreadyInPO =
+                          inPOIdx !== undefined ? editingOrder.items[inPOIdx] : null;
+                        const stats = periodUsageMap.get(key);
+                        const avgMonthly =
+                          stats !== undefined
+                            ? stats.avgMonthlyOut
+                            : allMonths.length === 0 && st.minStock > 0
+                            ? parseFloat(Math.max(0.5, st.minStock / 3).toFixed(1))
+                            : 0;
+                        const baseDemand =
+                          avgMonthly * 3 * (1 + editorBufferPercent / 100);
+                        const recOrder = Math.ceil(
+                          Math.max(0, baseDemand + st.minStock - st.currentBalance)
+                        );
+                        const defaultQty =
+                          customQtyByBarcode[st.barcode] !== undefined
+                            ? customQtyByBarcode[st.barcode]
+                            : recOrder > 0
+                            ? recOrder
+                            : 1;
+
+                        return (
+                          <div
+                            key={st.barcode}
+                            className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 py-2 hover:bg-sky-50/60 transition-colors text-xs"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-mono font-bold text-sky-800 bg-sky-50 px-1.5 py-0.5 rounded border border-sky-200">
+                                  {st.barcode}
+                                </span>
+                                <span className="font-bold text-slate-800 truncate">
+                                  {st.name}
+                                </span>
+                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+                                  {st.line || "-"}
+                                  {st.supplier ? ` · ${st.supplier}` : ""}
+                                </span>
+                                {alreadyInPO && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold border border-emerald-200">
+                                    อยู่ในใบสั่งซื้อแล้ว ({alreadyInPO.orderQty.toLocaleString()} {st.unit})
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-3 mt-1 text-[11px] text-slate-500 font-mono">
+                                <span>
+                                  คงเหลือ:{" "}
+                                  <strong className="text-slate-800">
+                                    {st.currentBalance.toLocaleString()}
+                                  </strong>{" "}
+                                  {st.unit}
+                                </span>
+                                <span>Min: {st.minStock.toLocaleString()}</span>
+                                <span className="text-indigo-700 font-semibold">
+                                  เฉลี่ย/ด. ({activePeriodObj.shortLabel}):{" "}
+                                  {avgMonthly.toLocaleString()}
+                                </span>
+                                <span className="text-sky-700 font-semibold">
+                                  แนะนำ: {recOrder.toLocaleString()}
+                                </span>
+                                <span>
+                                  ราคา/หน่วย: ฿{(st.unitCost || 0).toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                              <div className="flex items-center gap-1">
+                                <span className="text-[10px] text-slate-500">จำนวน:</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={defaultQty}
+                                  onChange={(e) =>
+                                    setCustomQtyByBarcode((prev) => ({
+                                      ...prev,
+                                      [st.barcode]: Math.max(1, parseInt(e.target.value) || 1),
+                                    }))
+                                  }
+                                  className="w-20 px-2 py-1 rounded-lg border border-slate-300 text-right font-mono font-bold text-slate-800 bg-white text-xs"
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleAddStockItemToPO(st, defaultQty)}
+                                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold shadow-2xs transition-colors cursor-pointer"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>{alreadyInPO ? "บวกเพิ่ม" : "เพิ่มรายการ"}</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="p-4 text-center bg-white space-y-2">
+                      <p className="text-xs text-slate-500">
+                        ไม่พบสินค้าในคลังที่ตรงกับคำค้นหา{" "}
+                        <strong className="text-slate-800">"{poItemSearch}"</strong>
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const q = poItemSearch.trim();
+                          if (/^[A-Za-z0-9\-_]+$/.test(q) && !q.includes(" ")) {
+                            setCustomBarcode(q);
+                          } else {
+                            setCustomItemName(q);
+                          }
+                          setShowCustomItemForm(true);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-2xs transition-colors cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>
+                          เพิ่ม "{poItemSearch}" เป็นรายการสินค้านอกลิสต์
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Custom / Unlisted Item Form */}
+              {showCustomItemForm && (
+                <form
+                  onSubmit={handleAddCustomItemToPO}
+                  className="p-4 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-3"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
+                      <Plus className="w-4 h-4 text-indigo-600" />
+                      <span>เพิ่มรายการสินค้าที่ไม่ได้อยู่ในลิสต์คลังสินค้า (กรอกข้อมูลเอง)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomItemForm(false)}
+                      className="text-xs text-slate-500 hover:text-slate-700 cursor-pointer"
+                    >
+                      ปิดฟอร์ม
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        บาร์โค้ด / รหัสสินค้า
+                      </label>
+                      <input
+                        type="text"
+                        value={customBarcode}
+                        onChange={(e) => setCustomBarcode(e.target.value)}
+                        placeholder="เว้นว่างเพื่อสร้างอัตโนมัติ"
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        ชื่อรายการสินค้า <span className="text-rose-600">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={customItemName}
+                        onChange={(e) => setCustomItemName(e.target.value)}
+                        placeholder="ระบุชื่อวัตถุดิบหรืออุปกรณ์..."
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        ไลน์ / หมวดหมู่
+                      </label>
+                      <input
+                        type="text"
+                        value={customLine}
+                        onChange={(e) => setCustomLine(e.target.value)}
+                        placeholder="เช่น MTO, ROLLER"
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        Supplier / ร้านค้า
+                      </label>
+                      <input
+                        type="text"
+                        value={customSupplier}
+                        onChange={(e) => setCustomSupplier(e.target.value)}
+                        placeholder="ระบุ Supplier"
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        จำนวนสั่งซื้อ ({customUnit || "ชิ้น"})
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          min="1"
+                          value={customOrderQty}
+                          onChange={(e) =>
+                            setCustomOrderQty(Math.max(1, parseInt(e.target.value) || 1))
+                          }
+                          className="w-full px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-mono text-right font-bold"
+                        />
+                        <input
+                          type="text"
+                          value={customUnit}
+                          onChange={(e) => setCustomUnit(e.target.value)}
+                          placeholder="หน่วย"
+                          className="w-14 px-1.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs text-center"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        ราคา/หน่วย (฿)
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={customUnitPrice}
+                          onChange={(e) =>
+                            setCustomUnitPrice(Math.max(0, parseFloat(e.target.value) || 0))
+                          }
+                          className="w-full px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-mono text-right"
+                        />
+                        <button
+                          type="submit"
+                          className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold whitespace-nowrap shadow-2xs cursor-pointer"
+                        >
+                          + เพิ่ม
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
+
           {/* Quick Action Toolbar for Items */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-2xl bg-sky-50/70 border border-sky-100 mb-4">
-            <div className="flex items-center gap-2 text-xs text-sky-900 font-semibold">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-sky-900 font-semibold">
               <ShoppingBag className="w-4 h-4 text-sky-600" />
-              <span>รายการสินค้า ({editingOrder.items.length} รายการ)</span>
+              <span>รายการสินค้าในใบสั่งซื้อ ({editingOrder.items.length} รายการ)</span>
+              <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 border border-indigo-200 text-[11px] font-bold">
+                เฉลี่ย/เดือน: {activePeriodObj.label}
+              </span>
               {editingOrder.filterSummary && (
                 <span className="text-slate-500 font-normal">
                   · เงื่อนไข: {editingOrder.filterSummary}
@@ -821,10 +1606,34 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
               )}
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1 bg-white px-2 py-1 rounded-xl border border-slate-200">
+                <span className="text-[11px] text-slate-500 font-medium mr-1">
+                  เฉลี่ย/เดือน:
+                </span>
+                {(["6m", "1y", "2y"] as BurnRatePeriod[]).map((pid) => {
+                  const pObj = BURN_RATE_PERIOD_OPTIONS.find((o) => o.id === pid)!;
+                  return (
+                    <button
+                      key={pid}
+                      type="button"
+                      onClick={() => handleApplyBurnRatePeriod(pid)}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+                        burnRatePeriod === pid
+                          ? "bg-indigo-600 text-white"
+                          : "text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      {pObj.shortLabel}
+                    </button>
+                  );
+                })}
+              </div>
+
               <button
+                type="button"
                 onClick={handleApplyAllRecommended}
-                className="px-3 py-1.5 rounded-xl bg-white hover:bg-sky-50 text-sky-700 border border-sky-200 text-xs font-bold shadow-2xs transition-colors"
+                className="px-3 py-1.5 rounded-xl bg-white hover:bg-sky-50 text-sky-700 border border-sky-200 text-xs font-bold shadow-2xs transition-colors cursor-pointer"
               >
                 เลือกจำนวนตามคำแนะนำทั้งหมด
               </button>
@@ -840,7 +1649,9 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
                   <th className="py-2.5 px-2 whitespace-nowrap">1. บาร์โค้ด</th>
                   <th className="py-2.5 px-3 min-w-[180px]">2. ชื่อรายการสินค้า</th>
                   <th className="py-2.5 px-2 whitespace-nowrap">3. ไลน์ / Supplier</th>
-                  <th className="py-2.5 px-2 text-right whitespace-nowrap">4. เฉลี่ย/ด.</th>
+                  <th className="py-2.5 px-2 text-right whitespace-nowrap text-indigo-800">
+                    4. เฉลี่ย/ด. ({activePeriodObj.shortLabel})
+                  </th>
                   <th className="py-2.5 px-2 text-center whitespace-nowrap">5. พอใช้</th>
                   <th className="py-2.5 px-2 text-center whitespace-nowrap">6. สถานะ</th>
                   <th className="py-2.5 px-2 text-right whitespace-nowrap">7. คงเหลือ</th>
@@ -875,7 +1686,7 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
                       <div className="font-medium text-slate-700">{it.line}</div>
                       {it.supplier && <div className="text-[10px] text-slate-400">{it.supplier}</div>}
                     </td>
-                    <td className="py-2.5 px-2 text-right font-mono text-slate-600 tabular-nums">
+                    <td className="py-2.5 px-2 text-right font-mono font-semibold text-indigo-700 tabular-nums">
                       {it.monthlyBurnRate.toLocaleString()}
                     </td>
                     <td className="py-2.5 px-2 text-center">
@@ -963,7 +1774,7 @@ export const PurchaseOrdersView: React.FC<PurchaseOrdersViewProps> = ({
                 {editingOrder.items.length === 0 && (
                   <tr>
                     <td colSpan={14} className="text-center py-10 text-xs text-slate-400">
-                      ยังไม่มีรายการสินค้าในใบสั่งซื้อนี้
+                      ยังไม่มีรายการสินค้าในใบสั่งซื้อนี้ — สามารถค้นหาจากบาร์โค้ด / ชื่อรายการสินค้าด้านบนเพื่อเพิ่มรายการได้ทันที
                     </td>
                   </tr>
                 )}
